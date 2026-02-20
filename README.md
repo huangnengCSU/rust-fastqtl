@@ -70,12 +70,12 @@ Options:
 
 ```bash
 rust_fastqtl \
-  -v genotypes.vcf.gz \
-  -b phenotypes.bed.gz \
-  -c covariates.txt \
+  -v example/genotypes.vcf.gz \
+  -b example/phenotypes.bed.gz \
+  -c example/covariates.txt.gz \
   -r 22:17000000-18000000 \
   -w 1000000 \
-  --threshold 0.05 \
+  --threshold 1.0 \
   --maf-threshold 0.01 \
   --ma-sample-threshold 1 \
   -o nominal.txt
@@ -90,12 +90,12 @@ phenotype_id  variant_id  distance  ma_samples  ma_count  maf  pval  beta  beta_
 
 ```bash
 rust_fastqtl \
-  -v genotypes.vcf.gz \
-  -b phenotypes.bed.gz \
-  -c covariates.txt \
+  -v example/genotypes.vcf.gz \
+  -b example/phenotypes.bed.gz \
+  -c example/covariates.txt.gz \
   -r 22:17000000-18000000 \
   -p 100 1000 \
-  --seed 42 \
+  --seed 12345 \
   -o permutation.txt
 ```
 
