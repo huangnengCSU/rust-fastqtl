@@ -428,8 +428,13 @@ fn parse_vcf(
                 .map(|v| v.unwrap_or(f64::NAN))
                 .collect::<Vec<f64>>();
             impute_nan(&mut values);
+            let id = if cols[2] == "." {
+                format!("{}_{}", chr, pos)
+            } else {
+                cols[2].to_string()
+            };
             genotypes.push(Genotype {
-                id: cols[2].to_string(),
+                id,
                 pos,
                 values,
                 sd: 0.0,
