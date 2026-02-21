@@ -419,29 +419,28 @@ fn parse_vcf(
             }
         }
 
-        if let Some((maf, ma_count, ma_samples)) = maf_stats(&vals_opt)
-            && maf >= maf_threshold
-            && ma_samples >= ma_sample_threshold
-        {
-            let mut values = vals_opt
-                .iter()
-                .map(|v| v.unwrap_or(f64::NAN))
-                .collect::<Vec<f64>>();
-            impute_nan(&mut values);
-            let id = if cols[2] == "." {
-                format!("{}_{}", chr, pos)
-            } else {
-                cols[2].to_string()
-            };
-            genotypes.push(Genotype {
-                id,
-                pos,
-                values,
-                sd: 0.0,
-                maf,
-                ma_count,
-                ma_samples,
-            });
+        if let Some((maf, ma_count, ma_samples)) = maf_stats(&vals_opt) {
+            if maf >= maf_threshold && ma_samples >= ma_sample_threshold {
+                let mut values = vals_opt
+                    .iter()
+                    .map(|v| v.unwrap_or(f64::NAN))
+                    .collect::<Vec<f64>>();
+                impute_nan(&mut values);
+                let id = if cols[2] == "." {
+                    format!("{}_{}", chr, pos)
+                } else {
+                    cols[2].to_string()
+                };
+                genotypes.push(Genotype {
+                    id,
+                    pos,
+                    values,
+                    sd: 0.0,
+                    maf,
+                    ma_count,
+                    ma_samples,
+                });
+            }
         }
 
         line.clear();
