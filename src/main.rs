@@ -580,14 +580,14 @@ fn inverse_normal_cdf(p: f64) -> f64 {
     }
 }
 
-fn pvalue_from_tstat2(t2: f64, _df: f64) -> f64 {
-    // FastQTL uses F(1,df); here we use a normal tail approximation for portability.
+fn pvalue_from_tstat2(t2: f64, df: f64) -> f64 {
+    // Exact F(1, df) p-value: P(F(1,df) > t²) = I_{1-c²}(df/2, 1/2)
+    // where c² = t²/(t²+df).  Equivalent to two-tailed t-test with df d.f.
     if !t2.is_finite() {
         return 0.0;
     }
-    let t = t2.max(0.0).sqrt();
-    let p = 2.0 * (1.0 - normal_cdf(t));
-    p.clamp(0.0, 1.0)
+    let c2 = t2 / (t2 + df);
+    pbeta(1.0 - c2, df / 2.0, 0.5)
 }
 
 // --- Regularized incomplete beta and helpers (for exact F-dist p-values and pbeta) ---
