@@ -116,11 +116,14 @@ The following differences from https://github.com/francois-a/fastqtl are known a
 
 | Aspect | Original FastQTL (C++) | rust-fastqtl |
 |---|---|---|
-| Nominal p-value | Exact F(1, df) CDF via Rmath `pf()` | Normal-tail approximation `2·Φ(−|t|)` — anti-conservative for small df |
+| Nominal p-value | Exact F(1, df) CDF via GSL `gsl_cdf_fdist_Q()` | Exact F(1, df) CDF via custom regularized incomplete beta (`pbeta`) — numerically equivalent |
+| Internal numeric precision | `float` (32-bit) for genotype/phenotype storage; `double` for statistics | `f64` (64-bit) throughout — small numerical differences possible |
 | Permutation shuffle | Shuffles raw (pre-residualization) phenotype, then re-residualizes each permutation | Shuffles already-residualized phenotype; no re-residualization per permutation |
-| Covariate residualization | Eigen `ColPivHouseholderQR` (QR decomposition) | Normal equations (X'X)⁻¹X'y via Gaussian elimination — less numerically stable for ill-conditioned covariate matrices |
-| PRNG | `std::random_shuffle` (stdlib, system-seeded) | XorShift64 — seeds are incompatible |
-| `ref_factor` output | Reported (REF/ALT orientation) | Not reported |
+| Covariate residualization | Eigen `ColPivHouseholderQR` (QR decomposition); detects and drops linearly dependent covariates | Normal equations (X'X)⁻¹X'y via Gauss-Jordan inversion — less numerically stable for ill-conditioned matrices; no rank-deficiency handling |
+| Categorical covariates | Automatically converts factor covariates to binary dummy variables; drops constant covariates | Only numeric covariates supported |
+| `learnDF` optimizer | 1-D Nelder-Mead via GSL (`nmsimplex2`), ≤20 iterations, tol=0.01 | Golden-section search over [1, max(3×df, 100)], 50 iterations, tol=0.01 |
+| PRNG | `std::random_shuffle` backed by `rand()`; supports `--seed` (default: `time(NULL)`) | XorShift64; supports `--seed` (default: 12345) — algorithms and seed spaces are incompatible |
+| `ref_factor` output | Reported in permutation output (REF/ALT orientation) | Not reported |
 | Conditional mapping | Implemented (`--mapping`) | Not implemented |
 | Interaction testing | Implemented (`--interaction`) | Not implemented |
 | Group-aware permutation | Implemented (`--grp`) | Not implemented |
