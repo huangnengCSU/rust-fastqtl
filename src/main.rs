@@ -1184,7 +1184,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         args.ma_sample_threshold,
     )?;
     if genotypes.is_empty() {
-        return Err("no genotypes found in selected cis window after filters".into());
+        return Ok(());
     }
 
     let residualizer = Residualizer::new(&covariates, samples.len());
