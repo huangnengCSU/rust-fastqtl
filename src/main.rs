@@ -1184,6 +1184,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         args.ma_sample_threshold,
     )?;
     if genotypes.is_empty() {
+        eprintln!("warning: no genotypes found in selected cis window after filters; writing empty output");
+        File::create(&args.out)?;
         return Ok(());
     }
 
