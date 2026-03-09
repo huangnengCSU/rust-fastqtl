@@ -14,6 +14,7 @@ A Rust reimplementation of the core FastQTL cis-QTL mapping logic.
 
 - Parse phenotype BED (`.bed` / `.bed.gz`) within a target `--region`
 - Parse genotype VCF (`.vcf` / `.vcf.gz`) within the cis-window (`--window`)
+- Parse methylation matrix BED (`--bedmethyl`) — rows = CpG sites, columns 4+ = per-sample methylation fractions; for mQTL mapping
 - MAF and minor-allele-sample filtering (`--maf-threshold`, `--ma-sample-threshold`)
 - Missing genotype/phenotype imputation by per-feature mean
 - Optional phenotype rank-normal transformation (`--normal`)
@@ -40,10 +41,12 @@ Requires Rust 1.85+ (edition 2024).
 ## Usage
 
 ```
-Usage: rust_fastqtl [OPTIONS] --vcf <VCF> --bed <BED> --out <OUT> --region <REGION>
+Usage: rust_fastqtl [OPTIONS] --bed <BED> --out <OUT> --region <REGION>
+                    (--vcf <VCF> | --bedmethyl <BEDMETHYL>)
 
 Options:
   -v, --vcf <VCF>                            Input VCF/BCF file (may be gzip-compressed)
+  -m, --bedmethyl <BEDMETHYL>          Input methylation matrix BED file (rows=CpG sites, cols 4+=per-sample fractions)
   -b, --bed <BED>                            Input BED phenotype file (may be gzip-compressed)
   -o, --out <OUT>                            Output file path
   -c, --cov <COV>                            Covariate file (optional)
@@ -58,6 +61,8 @@ Options:
   -h, --help                                 Print help
 ```
 
+Exactly one of `--vcf` or `--bedmethyl` must be provided.
+
 ### `--permute` modes
 
 | Invocation | Behaviour |
@@ -68,6 +73,7 @@ Options:
 
 ### Nominal mode
 
+With VCF genotypes:
 ```bash
 rust_fastqtl \
   -v example/genotypes.vcf.gz \
@@ -81,6 +87,18 @@ rust_fastqtl \
   -o nominal.txt
 ```
 
+With bedMethyl (mQTL):
+```bash
+rust_fastqtl \
+  -m example/methylation.bed.gz \
+  -b example/phenotypes.bed.gz \
+  -c example/covariates.txt.gz \
+  -r 22:17000000-18000000 \
+  -w 1000000 \
+  --threshold 1.0 \
+  -o nominal.txt
+```
+
 Output columns:
 ```
 phenotype_id  variant_id  distance  ma_samples  ma_count  maf  pval  beta  beta_se
@@ -88,9 +106,22 @@ phenotype_id  variant_id  distance  ma_samples  ma_count  maf  pval  beta  beta_
 
 ### Permutation mode
 
+With VCF genotypes:
 ```bash
 rust_fastqtl \
   -v example/genotypes.vcf.gz \
+  -b example/phenotypes.bed.gz \
+  -c example/covariates.txt.gz \
+  -r 22:17000000-18000000 \
+  -p 100 1000 \
+  --seed 12345 \
+  -o permutation.txt
+```
+
+With bedMethyl (mQTL):
+```bash
+rust_fastqtl \
+  -m example/methylation.bed.gz \
   -b example/phenotypes.bed.gz \
   -c example/covariates.txt.gz \
   -r 22:17000000-18000000 \
@@ -107,6 +138,27 @@ p_empirical  p_beta_adjusted
 ```
 
 `p_beta_adjusted` is the key column for downstream FDR control (e.g. Storey's q-value or Benjamini-Hochberg).
+
+---
+
+## bedMethyl format (`--bedmethyl`)
+
+A tab-separated methylation matrix file where rows are CpG (or other modified base) sites and columns 4+ are per-sample methylation fractions. This enables mQTL mapping — testing associations between methylation levels and phenotypes (e.g. gene expression).
+
+```
+#chr    start   end     site_id         SAMPLE1  SAMPLE2  SAMPLE3  ...
+chr22   100000  100001  CpG_100001      0.82     0.61     0.75     ...
+chr22   200000  200001  CpG_200001      0.10     0.05     0.12     ...
+```
+
+- `start` is 0-based (BED convention); the site position used for windowing is `start + 1`
+- Methylation values are typically in [0, 1] (fraction modified); values in [0, 2] (dosage scale) also work
+- Missing values can be encoded as `NA` or `.` — they are imputed by per-site mean
+- Sample IDs in the header must match those in the phenotype BED header
+- The file may be plain text or bgzipped (`.bed.gz`)
+- MAF filtering (`--maf-threshold`) is not meaningful for continuous methylation fractions; leave at default (0) to disable it
+
+`--bedmethyl` and `--vcf` are mutually exclusive; exactly one must be provided.
 
 ---
 

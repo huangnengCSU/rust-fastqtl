@@ -10,9 +10,14 @@ use clap::{ArgAction, Parser};
 #[derive(Debug, Parser)]
 #[command(name = "rust-fastqtl", about = "Fast cis-QTL mapper (Rust port of FastQTL)")]
 struct Args {
-    /// Input VCF/BCF file (may be gzip-compressed)
+    /// Input VCF/BCF file (may be gzip-compressed; mutually exclusive with --bedmethyl)
     #[arg(short, long)]
-    vcf: String,
+    vcf: Option<String>,
+
+    /// Input methylation matrix BED file — rows=CpG sites, cols 4+ are per-sample methylation
+    /// fractions (mutually exclusive with --vcf)
+    #[arg(short, long)]
+    bedmethyl: Option<String>,
 
     /// Input BED phenotype file (may be gzip-compressed)
     #[arg(short, long)]
@@ -431,6 +436,91 @@ fn parse_vcf(
                 } else {
                     cols[2].to_string()
                 };
+                genotypes.push(Genotype {
+                    id,
+                    pos,
+                    values,
+                    sd: 0.0,
+                    maf,
+                    ma_count,
+                    ma_samples,
+                });
+            }
+        }
+
+        line.clear();
+    }
+
+    Ok(genotypes)
+}
+
+fn parse_genotype_bed(
+    path: &str,
+    region: &Region,
+    window: i32,
+    sample_index: &HashMap<String, usize>,
+    n_samples: usize,
+    maf_threshold: f64,
+    ma_sample_threshold: usize,
+) -> Result<Vec<Genotype>, Box<dyn Error>> {
+    let mut reader = open_bufread(path)?;
+    let mut line = String::new();
+
+    if reader.read_line(&mut line)? == 0 {
+        return Err("empty genotype BED".into());
+    }
+    let header: Vec<&str> = line.trim_end().split('\t').collect();
+    if header.len() < 5 {
+        return Err("genotype BED header must have at least 5 columns (chr, start, end, id, sample...)".into());
+    }
+    // Build mapping: BED column index (relative to col 4) -> phenotype sample index
+    let mut mapping: Vec<Option<usize>> = Vec::new();
+    for s in &header[4..] {
+        mapping.push(sample_index.get(*s).copied());
+    }
+
+    let gstart = (region.start - window).max(0);
+    let gend = region.end + window;
+
+    let mut genotypes = Vec::new();
+    line.clear();
+    while reader.read_line(&mut line)? > 0 {
+        if line.trim().is_empty() {
+            line.clear();
+            continue;
+        }
+        let cols: Vec<&str> = line.trim_end().split('\t').collect();
+        if cols.len() < 4 + mapping.len() {
+            line.clear();
+            continue;
+        }
+
+        let chr = cols[0];
+        let start0: i32 = cols[1].parse()?;
+        let pos = start0 + 1; // convert to 1-based
+        if chr != region.chr || pos < gstart || pos > gend {
+            line.clear();
+            continue;
+        }
+
+        let id = cols[3].to_string();
+
+        let mut vals_opt = vec![None::<f64>; n_samples];
+        for (i, v) in cols[4..].iter().enumerate() {
+            if let Some(sidx) = mapping.get(i).copied().flatten() {
+                if *v != "NA" && *v != "." {
+                    vals_opt[sidx] = v.parse::<f64>().ok();
+                }
+            }
+        }
+
+        if let Some((maf, ma_count, ma_samples)) = maf_stats(&vals_opt) {
+            if maf >= maf_threshold && ma_samples >= ma_sample_threshold {
+                let mut values = vals_opt
+                    .iter()
+                    .map(|v| v.unwrap_or(f64::NAN))
+                    .collect::<Vec<f64>>();
+                impute_nan(&mut values);
                 genotypes.push(Genotype {
                     id,
                     pos,
@@ -1153,6 +1243,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     if !(0.0..0.5).contains(&args.maf_threshold) {
         return Err("--maf-threshold must satisfy 0 <= x < 0.5".into());
     }
+    if args.vcf.is_some() == args.bedmethyl.is_some() {
+        return Err("specify exactly one of --vcf or --bedmethyl".into());
+    }
 
     let region = parse_region(&args.region)?;
 
@@ -1174,15 +1267,28 @@ fn main() -> Result<(), Box<dyn Error>> {
         Vec::new()
     };
 
-    let mut genotypes = parse_vcf(
-        &args.vcf,
-        &region,
-        args.window,
-        &sample_index,
-        samples.len(),
-        args.maf_threshold,
-        args.ma_sample_threshold,
-    )?;
+    let mut genotypes = if let Some(vcf_path) = args.vcf.as_ref() {
+        parse_vcf(
+            vcf_path,
+            &region,
+            args.window,
+            &sample_index,
+            samples.len(),
+            args.maf_threshold,
+            args.ma_sample_threshold,
+        )?
+    } else {
+        let gbed_path = args.bedmethyl.as_ref().unwrap();
+        parse_genotype_bed(
+            gbed_path,
+            &region,
+            args.window,
+            &sample_index,
+            samples.len(),
+            args.maf_threshold,
+            args.ma_sample_threshold,
+        )?
+    };
     if genotypes.is_empty() {
         eprintln!("warning: no genotypes found in selected cis window after filters; writing empty output");
         File::create(&args.out)?;
