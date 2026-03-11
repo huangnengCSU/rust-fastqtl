@@ -46,7 +46,7 @@ Usage: rust_fastqtl [OPTIONS] --bed <BED> --out <OUT> --region <REGION>
 
 Options:
   -v, --vcf <VCF>                            Input VCF/BCF file (may be gzip-compressed)
-  -m, --bedmethyl <BEDMETHYL>          Input methylation matrix BED file (rows=CpG sites, cols 4+=per-sample fractions)
+  -m, --bedmethyl <BEDMETHYL>                Input methylation matrix BED file (rows=methylation sites, cols 4+=per-sample fractions)
   -b, --bed <BED>                            Input BED phenotype file (may be gzip-compressed)
   -o, --out <OUT>                            Output file path
   -c, --cov <COV>                            Covariate file (optional)
