@@ -11,12 +11,12 @@ use clap::{ArgAction, Parser};
 #[command(name = "rust-fastqtl", about = "Fast cis-QTL mapper (Rust port of FastQTL)")]
 struct Args {
     /// Input VCF/BCF file (may be gzip-compressed; mutually exclusive with --bedmethyl)
-    #[arg(short, long)]
+    #[arg(short = 'v', long, required_unless_present = "bedmethyl", conflicts_with = "bedmethyl")]
     vcf: Option<String>,
 
     /// Input methylation matrix BED file — rows=CpG sites, cols 4+ are per-sample methylation
     /// fractions (mutually exclusive with --vcf)
-    #[arg(short, long)]
+    #[arg(short = 'm', long, conflicts_with = "vcf")]
     bedmethyl: Option<String>,
 
     /// Input BED phenotype file (may be gzip-compressed)
@@ -1242,9 +1242,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if !(0.0..0.5).contains(&args.maf_threshold) {
         return Err("--maf-threshold must satisfy 0 <= x < 0.5".into());
-    }
-    if args.vcf.is_some() == args.bedmethyl.is_some() {
-        return Err("specify exactly one of --vcf or --bedmethyl".into());
     }
 
     let region = parse_region(&args.region)?;
