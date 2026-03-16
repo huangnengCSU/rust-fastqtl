@@ -2,10 +2,12 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Cursor, Write};
-use std::process::Command;
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::path::Path;
+use std::process::{Child, ChildStdout, Command, Stdio};
 
 use clap::{ArgAction, Parser};
+use flate2::read::MultiGzDecoder;
 
 #[derive(Debug, Parser)]
 #[command(name = "rust-fastqtl", about = "Fast cis-QTL mapper (Rust port of FastQTL)")]
@@ -101,6 +103,54 @@ struct XorShift64 {
     state: u64,
 }
 
+struct ChildBufRead {
+    child: Child,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl ChildBufRead {
+    fn spawn(command: &str, args: &[&str]) -> Result<Self, Box<dyn Error>> {
+        let mut child = Command::new(command)
+            .args(args)
+            .stdout(Stdio::piped())
+            .spawn()?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| format!("{} did not provide stdout", command))?;
+        Ok(Self {
+            child,
+            stdout: BufReader::new(stdout),
+        })
+    }
+}
+
+impl Read for ChildBufRead {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.stdout.read(buf)
+    }
+}
+
+impl BufRead for ChildBufRead {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        self.stdout.fill_buf()
+    }
+
+    fn consume(&mut self, amt: usize) {
+        self.stdout.consume(amt);
+    }
+}
+
+impl Drop for ChildBufRead {
+    fn drop(&mut self) {
+        if let Ok(status) = self.child.wait() {
+            if !status.success() {
+                eprintln!("warning: child process exited with status {}", status);
+            }
+        }
+    }
+}
+
 impl XorShift64 {
     fn new(seed: u64) -> Self {
         let state = if seed == 0 { 0x9e3779b97f4a7c15 } else { seed };
@@ -164,15 +214,35 @@ fn parse_region(s: &str) -> Result<Region, Box<dyn Error>> {
 
 fn open_bufread(path: &str) -> Result<Box<dyn BufRead>, Box<dyn Error>> {
     if path.ends_with(".gz") {
-        let out = Command::new("gzip").arg("-cd").arg(path).output()?;
-        if !out.status.success() {
-            return Err(format!("failed to read gzip file: {}", path).into());
-        }
-        Ok(Box::new(BufReader::new(Cursor::new(out.stdout))))
+        let file = File::open(path)?;
+        let decoder = MultiGzDecoder::new(file);
+        Ok(Box::new(BufReader::new(decoder)))
     } else {
         let file = File::open(path)?;
         Ok(Box::new(BufReader::new(file)))
     }
+}
+
+fn has_tabix_index(path: &str) -> bool {
+    let tbi = format!("{}.tbi", path);
+    let csi = format!("{}.csi", path);
+    Path::new(&tbi).exists() || Path::new(&csi).exists()
+}
+
+fn open_vcf_reader(path: &str, region: &Region, window: i32) -> Result<Box<dyn BufRead>, Box<dyn Error>> {
+    let gstart = (region.start - window).max(1);
+    let gend = (region.end + window).max(1);
+    let region_arg = format!("{}:{}-{}", region.chr, gstart, gend);
+
+    if path.ends_with(".vcf.gz") && has_tabix_index(path) {
+        let args = ["-h", path, region_arg.as_str()];
+        if let Ok(reader) = ChildBufRead::spawn("tabix", &args) {
+            return Ok(Box::new(reader));
+        }
+        eprintln!("warning: tabix unavailable; falling back to full VCF scan");
+    }
+
+    open_bufread(path)
 }
 
 fn parse_bed(
@@ -395,7 +465,7 @@ fn parse_vcf(
     maf_threshold: f64,
     ma_sample_threshold: usize,
 ) -> Result<Vec<Genotype>, Box<dyn Error>> {
-    let mut reader = open_bufread(path)?;
+    let mut reader = open_vcf_reader(path, region, window)?;
     let mut line = String::new();
 
     let mut mapping: Vec<Option<usize>> = Vec::new();
