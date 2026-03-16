@@ -76,6 +76,7 @@ struct Region {
 struct Phenotype {
     id: String,
     start: i32,
+    end: i32,
     values: Vec<f64>,
     sd: f64,
 }
@@ -218,6 +219,7 @@ fn parse_bed(
             line.clear();
             continue;
         }
+        let end: i32 = cols[2].parse()?; // BED 0-based exclusive = 1-based inclusive end
 
         let id = cols[3].to_string();
         let mut values = Vec::with_capacity(samples.len());
@@ -232,6 +234,7 @@ fn parse_bed(
         phenotypes.push(Phenotype {
             id,
             start: start1,
+            end,
             values,
             sd: 0.0,
         });
@@ -1103,6 +1106,17 @@ impl Residualizer {
     }
 }
 
+/// Distance from variant to the nearer phenotype boundary (start or end).
+/// Picks whichever of start/end is closer, then returns g_pos - anchor (signed).
+/// Negative = upstream of that boundary, positive = downstream.
+fn dist_to_body(g_pos: i32, p_start: i32, p_end: i32) -> i32 {
+    if (g_pos - p_start).abs() <= (g_pos - p_end).abs() {
+        g_pos - p_start
+    } else {
+        g_pos - p_end
+    }
+}
+
 fn run_nominal(
     out_path: &str,
     phenotypes: &[Phenotype],
@@ -1119,6 +1133,7 @@ fn run_nominal(
             if dist.abs() > cis_window {
                 continue;
             }
+            let dist2 = dist_to_body(g.pos, p.start, p.end);
             let c = corr(&g.values, &p.values);
             let df = (p.values.len() as i32 - 2 - n_cov as i32) as f64;
             if df <= 0.0 {
@@ -1135,8 +1150,8 @@ fn run_nominal(
                 };
                 writeln!(
                     out,
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                    p.id, g.id, dist, g.ma_samples, g.ma_count, g.maf, pval, b, bse
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    p.id, g.id, dist, dist2, g.ma_samples, g.ma_count, g.maf, pval, b, bse
                 )?;
             }
         }
@@ -1164,27 +1179,30 @@ fn run_permutation(
             .filter_map(|(gi, g)| {
                 let d = g.pos - p.start;
                 if d.abs() <= cis_window {
-                    Some((gi, d))
+                    let d2 = dist_to_body(g.pos, p.start, p.end);
+                    Some((gi, d, d2))
                 } else {
                     None
                 }
             })
-            .collect::<Vec<(usize, i32)>>();
+            .collect::<Vec<(usize, i32, i32)>>();
 
         if target.is_empty() {
-            writeln!(out, "{}\t0\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA", p.id)?;
+            writeln!(out, "{}\t0\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA", p.id)?;
             continue;
         }
 
         let mut best_corr: f64 = 0.0;
         let mut best_g = target[0].0;
         let mut best_d = target[0].1;
-        for (gi, d) in &target {
+        let mut best_d2 = target[0].2;
+        for (gi, d, d2) in &target {
             let c = corr(&genotypes[*gi].values, &p.values);
             if c.abs() > best_corr.abs() || (c.abs() == best_corr.abs() && d.abs() < best_d.abs()) {
                 best_corr = c;
                 best_g = *gi;
                 best_d = *d;
+                best_d2 = *d2;
             }
         }
 
@@ -1199,7 +1217,7 @@ fn run_permutation(
             normalize(&mut yperm);
 
             let mut best_pcorr: f64 = 0.0;
-            for (gi, _) in &target {
+            for (gi, _, _) in &target {
                 let c = corr(&genotypes[*gi].values, &yperm);
                 if c.abs() > best_pcorr.abs() {
                     best_pcorr = c;
@@ -1258,7 +1276,7 @@ fn run_permutation(
 
         writeln!(
             out,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             p.id,
             target.len(),
             beta_shape1,
@@ -1267,6 +1285,7 @@ fn run_permutation(
             p_nom_eff,
             genotypes[best_g].id,
             best_d,
+            best_d2,
             genotypes[best_g].ma_samples,
             genotypes[best_g].ma_count,
             genotypes[best_g].maf,

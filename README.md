@@ -101,8 +101,13 @@ rust_fastqtl \
 
 Output columns:
 ```
-phenotype_id  variant_id  distance  ma_samples  ma_count  maf  pval  beta  beta_se
+phenotype_id  variant_id  distance  distance_to_body  ma_samples  ma_count  maf  pval  beta  beta_se
 ```
+
+| Column | Description |
+|---|---|
+| `distance` | `variant_pos − phenotype_start` (signed; TSS-anchored, matches original FastQTL) |
+| `distance_to_body` | Signed distance anchored at the nearer of `phenotype_start` or `phenotype_end`. The closer boundary is chosen as anchor; the value is `variant_pos − anchor` (negative = upstream of that boundary, positive = downstream). More informative than `distance` for long phenotypes such as introns, where the variant may be far from the TSS but close to the splice site. |
 
 ### Permutation mode
 
@@ -133,9 +138,11 @@ rust_fastqtl \
 Output columns:
 ```
 phenotype_id  n_variants  beta_shape1  beta_shape2  eff_df  p_nom_eff
-variant_id  distance  ma_samples  ma_count  maf  p_nom  beta  beta_se
+variant_id  distance  distance_to_body  ma_samples  ma_count  maf  p_nom  beta  beta_se
 p_empirical  p_beta_adjusted
 ```
+
+`distance` and `distance_to_body` follow the same definitions as in the nominal pass (see above).
 
 `p_beta_adjusted` is the key column for downstream FDR control (e.g. Storey's q-value or Benjamini-Hochberg).
 
