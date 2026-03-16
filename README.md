@@ -14,7 +14,7 @@ A Rust reimplementation of the core FastQTL cis-QTL mapping logic.
 
 - Parse phenotype BED (`.bed` / `.bed.gz`) within a target `--region`
 - Parse genotype VCF (`.vcf` / `.vcf.gz`) within the cis-window (`--window`)
-- Parse methylation matrix BED (`--bedmethyl`) — rows = CpG sites, columns 4+ = per-sample methylation fractions; for mQTL mapping
+- Parse methylation matrix BED (`--bedmethyl`) — rows = CpG sites, columns 4+ = per-sample methylation values; supports continuous fractions (0.0–1.0) **or** integer dosage encoding (0/1/2); for mQTL mapping
 - MAF and minor-allele-sample filtering (`--maf-threshold`, `--ma-sample-threshold`)
 - Missing genotype/phenotype imputation by per-feature mean
 - Optional phenotype rank-normal transformation (`--normal`)
@@ -143,7 +143,11 @@ p_empirical  p_beta_adjusted
 
 ## bedMethyl format (`--bedmethyl`)
 
-A tab-separated methylation matrix file where rows are CpG (or other modified base) sites and columns 4+ are per-sample methylation fractions. This enables mQTL mapping — testing associations between methylation levels and phenotypes (e.g. gene expression).
+A tab-separated methylation matrix file where rows are CpG (or other modified base) sites and columns 4+ are per-sample methylation values. This enables mQTL mapping — testing associations between methylation levels and phenotypes (e.g. gene expression).
+
+Two value encodings are supported and **auto-detected** from the first data row:
+
+### Encoding 1 — continuous fraction (0.0–1.0)
 
 ```
 #chr    start   end     site_id         SAMPLE1  SAMPLE2  SAMPLE3  ...
@@ -151,12 +155,35 @@ chr22   100000  100001  CpG_100001      0.82     0.61     0.75     ...
 chr22   200000  200001  CpG_200001      0.10     0.05     0.12     ...
 ```
 
+Each value is the fraction of reads (or CpG alleles) showing methylation. MAF is computed by binarising at 0.5: `maf = min(n_high, n_low) / n_total`, where `n_high` = samples with fraction ≥ 0.5 and `n_low` = samples with fraction < 0.5. `ma_count` / `ma_samples` in the output both equal the count of the minority-methylation samples.
+
+> MAF filtering (`--maf-threshold`) is not meaningful for most continuous methylation data; leave at default (0) to disable it.
+
+### Encoding 2 — integer dosage (0 / 1 / 2)
+
+```
+#chr    start   end     site_id         SAMPLE1  SAMPLE2  SAMPLE3  ...
+chr22   100000  100001  CpG_100001      2        1        2        ...
+chr22   200000  200001  CpG_200001      0        0        1        ...
+```
+
+Each value is an integer genotype-like call:
+
+| Value | Meaning |
+|-------|---------|
+| `0`   | Low methylation |
+| `1`   | Hemi-methylation |
+| `2`   | High methylation |
+
+MAF and `ma_count` / `ma_samples` are computed identically to SNV dosage: `maf = min(ref_alleles, alt_alleles) / (2 × n_samples)`, where `ref_alleles = 2×n0 + n1` and `alt_alleles = n1 + 2×n2`. `--maf-threshold` and `--ma-sample-threshold` work the same as for VCF variants.
+
+### Common notes
+
+- Auto-detection: if every non-NA value in the first data row is exactly 0, 1, or 2, integer dosage mode is used; otherwise continuous fraction mode is used.
 - `start` is 0-based (BED convention); the site position used for windowing is `start + 1`
-- Methylation values are typically in [0, 1] (fraction modified); values in [0, 2] (dosage scale) also work
 - Missing values can be encoded as `NA` or `.` — they are imputed by per-site mean
 - Sample IDs in the header must match those in the phenotype BED header
 - The file may be plain text or bgzipped (`.bed.gz`)
-- MAF filtering (`--maf-threshold`) is not meaningful for continuous methylation fractions; leave at default (0) to disable it
 
 `--bedmethyl` and `--vcf` are mutually exclusive; exactly one must be provided.
 
