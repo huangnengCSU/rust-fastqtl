@@ -41,6 +41,11 @@ struct Args {
     #[arg(short, long, default_value_t = 1_000_000)]
     window: i32,
 
+    /// Minimum distance (bp) from variant to phenotype body; variants closer than this are excluded.
+    /// Useful to exclude CpG-overlapping SNPs in methylation QTL. Default 0 (no filtering).
+    #[arg(long, default_value_t = 0)]
+    min_window: i32,
+
     /// P-value threshold for nominal-pass output
     #[arg(long, default_value_t = 1.0)]
     threshold: f64,
@@ -1192,6 +1197,7 @@ fn run_nominal(
     phenotypes: &[Phenotype],
     genotypes: &[Genotype],
     cis_window: i32,
+    min_window: i32,
     threshold: f64,
     n_cov: usize,
 ) -> Result<(), Box<dyn Error>> {
@@ -1204,6 +1210,9 @@ fn run_nominal(
                 continue;
             }
             let dist2 = dist_to_body(g.pos, p.start, p.end);
+            if dist2.abs() < min_window {
+                continue;
+            }
             let c = corr(&g.values, &p.values);
             let df = (p.values.len() as i32 - 2 - n_cov as i32) as f64;
             if df <= 0.0 {
@@ -1235,6 +1244,7 @@ fn run_permutation(
     phenotypes: &[Phenotype],
     genotypes: &[Genotype],
     cis_window: i32,
+    min_window: i32,
     n_cov: usize,
     permute: &[usize],
     seed: u64,
@@ -1250,6 +1260,9 @@ fn run_permutation(
                 let d = g.pos - p.start;
                 if d.abs() <= cis_window {
                     let d2 = dist_to_body(g.pos, p.start, p.end);
+                    if d2.abs() < min_window {
+                        return None;
+                    }
                     Some((gi, d, d2))
                 } else {
                     None
@@ -1379,6 +1392,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     if args.window <= 0 {
         return Err("--window must be positive".into());
     }
+    if args.min_window < 0 {
+        return Err("--min-window must be >= 0".into());
+    }
+    if args.min_window > args.window {
+        return Err("--min-window must be <= --window".into());
+    }
     if !(0.0 < args.threshold && args.threshold <= 1.0) {
         return Err("--threshold must satisfy 0 < x <= 1".into());
     }
@@ -1453,6 +1472,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             &phenotypes,
             &genotypes,
             args.window,
+            args.min_window,
             covariates.len(),
             permute,
             args.seed,
@@ -1463,6 +1483,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             &phenotypes,
             &genotypes,
             args.window,
+            args.min_window,
             args.threshold,
             covariates.len(),
         )?;
