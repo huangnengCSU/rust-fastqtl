@@ -16,8 +16,8 @@ struct Args {
     #[arg(short = 'v', long, required_unless_present = "bedmethyl", conflicts_with = "bedmethyl")]
     vcf: Option<String>,
 
-    /// Input methylation matrix BED file — rows=CpG sites, cols 4+ are per-sample methylation
-    /// fractions (mutually exclusive with --vcf)
+    /// Input methylation matrix BED file — rows=CpG sites, cols 4+ are per-sample integer dosage
+    /// (0/1/2; mutually exclusive with --vcf)
     #[arg(short = 'm', long, conflicts_with = "vcf")]
     bedmethyl: Option<String>,
 
@@ -391,36 +391,6 @@ fn parse_gt_or_ds(sample_field: &str, _fmt_fields: &[&str], idx: usize, gt_mode:
     }
 }
 
-/// MAF stats for continuous methylation fractions (0.0–1.0).
-/// Uses 0.5 as threshold to define "methylated" vs "unmethylated".
-/// Returns (maf, ma_count, ma_samples) where ma_count == ma_samples
-/// = number of samples on the minority methylation side.
-fn maf_stats_frac(values: &[Option<f64>]) -> Option<(f64, i32, usize)> {
-    let mut n_high = 0_usize; // fraction >= 0.5
-    let mut n_low = 0_usize;  // fraction < 0.5
-    for v in values {
-        if let Some(x) = v {
-            if *x < 0.0 || *x > 1.0 {
-                return None;
-            }
-            if *x >= 0.5 {
-                n_high += 1;
-            } else {
-                n_low += 1;
-            }
-        }
-    }
-    let n = n_high + n_low;
-    if n == 0 {
-        return None;
-    }
-    let (ma_n, maf) = if n_high <= n_low {
-        (n_high, n_high as f64 / n as f64)
-    } else {
-        (n_low, n_low as f64 / n as f64)
-    };
-    Some((maf, ma_n as i32, ma_n))
-}
 
 fn maf_stats(values: &[Option<f64>]) -> Option<(f64, i32, usize)> {
     let mut c0 = 0_i32;
@@ -591,12 +561,6 @@ fn parse_genotype_bed(
     let gstart = (region.start - window).max(0);
     let gend = region.end + window;
 
-    // Detect dosage mode (0/1/2 integers) vs fraction mode (0.0–1.0) from the first
-    // data row that has at least one non-NA value.
-    // dosage_mode = Some(true)  → integer 0/1/2 encoding (like SNV genotype)
-    // dosage_mode = Some(false) → continuous methylation fraction
-    let mut dosage_mode: Option<bool> = None;
-
     let mut genotypes = Vec::new();
     line.clear();
     while reader.read_line(&mut line)? > 0 {
@@ -629,21 +593,7 @@ fn parse_genotype_bed(
             }
         }
 
-        // Auto-detect on first row with actual values
-        if dosage_mode.is_none() {
-            let is_dosage = vals_opt
-                .iter()
-                .filter_map(|v| *v)
-                .all(|x| x == 0.0 || x == 1.0 || x == 2.0);
-            dosage_mode = Some(is_dosage);
-        }
-        let use_dosage = dosage_mode.unwrap_or(true);
-
-        let stats = if use_dosage {
-            maf_stats(&vals_opt)
-        } else {
-            maf_stats_frac(&vals_opt)
-        };
+        let stats = maf_stats(&vals_opt);
 
         if let Some((maf, ma_count, ma_samples)) = stats {
             if maf >= maf_threshold && ma_samples >= ma_sample_threshold {
