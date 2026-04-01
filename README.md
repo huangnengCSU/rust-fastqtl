@@ -12,11 +12,12 @@ A Rust reimplementation of the core FastQTL cis-QTL mapping logic.
 
 ## Features
 
-- Parse phenotype BED (`.bed` / `.bed.gz`) within a target `--region`
+- Parse phenotype BED (`.bed` / `.bed.gz`) — loaded once, filtered per region
 - Parse genotype VCF (`.vcf` / `.vcf.gz`) within the cis-window (`--window`)
 - Stream gzip input (no full-file decompression into memory)
 - Use `tabix -h` region retrieval automatically for `.vcf.gz` with `.tbi/.csi` index
-- Parse methylation matrix BED (`--bedmethyl`) — rows = CpG sites, columns 4+ = per-sample integer dosage (0/1/2); for mQTL mapping
+- **Multi-region parallel processing**: pass multiple `-r` regions; all regions run concurrently with `rayon` and results are merged in order into a single output file; thread count controlled by `--threads`
+- Parse methylation matrix BED (`--bedmethyl`) — rows = CpG sites, columns 4+ = per-sample integer dosage (0/1/2); methylation used as **predictor** (genotype-like), phenotype BED as **outcome** (e.g. splicing → methyl-sQTL; expression → methyl-eQTL)
 - MAF and minor-allele-sample filtering (`--maf-threshold`, `--ma-sample-threshold`)
 - Missing genotype/phenotype imputation by per-feature mean
 - Optional phenotype rank-normal transformation (`--normal`)
@@ -43,16 +44,18 @@ Requires Rust 1.85+ (edition 2024).
 ## Usage
 
 ```
-Usage: rust_fastqtl [OPTIONS] --bed <BED> --out <OUT> --region <REGION>
+Usage: rust_fastqtl [OPTIONS] --bed <BED> --out <OUT> -r <REGION>...
                     (--vcf <VCF> | --bedmethyl <BEDMETHYL>)
 
 Options:
   -v, --vcf <VCF>                            Input VCF/BCF file (may be gzip-compressed)
   -m, --bedmethyl <BEDMETHYL>                Input methylation matrix BED file (rows=methylation sites, cols 4+=per-sample integer dosage 0/1/2)
   -b, --bed <BED>                            Input BED phenotype file (may be gzip-compressed)
-  -o, --out <OUT>                            Output file path
+  -o, --out <OUT>                            Merged output file (all regions combined)
+      --out-dir <DIR>                        Output directory for per-region files (optional)
   -c, --cov <COV>                            Covariate file (optional)
-  -r, --region <REGION>                      Genomic region to analyse (chr:start-end or chr)
+  -r, --region <REGION>...                   Region(s) to analyse (chr:start-end or chr); repeat for multiple
+  -t, --threads <THREADS>                    Parallel threads [default: all CPUs]
   -w, --window <WINDOW>                      Cis-window size in bp [default: 1000000]
       --threshold <THRESHOLD>                P-value threshold for nominal-pass output [default: 1]
       --maf-threshold <MAF_THRESHOLD>        Minor allele frequency filter [default: 0]
@@ -81,7 +84,7 @@ Exactly one of `--vcf` or `--bedmethyl` must be provided.
 
 ### Nominal mode
 
-With VCF genotypes:
+Single region:
 ```bash
 rust_fastqtl \
   -v example/genotypes.vcf.gz \
@@ -95,7 +98,37 @@ rust_fastqtl \
   -o nominal.txt
 ```
 
-With bedMethyl (mQTL):
+Multiple regions (all chromosomes, parallel) — merged output only:
+```bash
+rust_fastqtl \
+  -v example/genotypes.vcf.gz \
+  -b example/phenotypes.bed.gz \
+  -c example/covariates.txt.gz \
+  -r chr1 chr2 chr3 chr4 chr5 \
+  -t 5 \
+  --maf-threshold 0.01 \
+  --ma-sample-threshold 5 \
+  -o nominal_all.txt
+```
+
+Multiple regions — merged output **and** per-region files:
+```bash
+rust_fastqtl \
+  -v example/genotypes.vcf.gz \
+  -b example/phenotypes.bed.gz \
+  -c example/covariates.txt.gz \
+  -r chr1 chr2 chr3 chr4 chr5 \
+  -t 5 \
+  --maf-threshold 0.01 \
+  --ma-sample-threshold 5 \
+  -o nominal_all.txt \
+  --out-dir results/
+# produces: nominal_all.txt  +  results/chr1.txt  results/chr2.txt  ...
+```
+
+> `--region` / `-r` accepts any mix of whole-chromosome (`chr1`) and sub-region (`chr1:1000000-2000000`) strings. Each region is processed in a separate rayon thread; phenotype BED is loaded once and filtered per region; genotype VCF is queried independently per region via tabix. `--out` is always written (merged); `--out-dir` is optional and produces one file per region named `<region>.txt` (`:` replaced by `_` in filenames).
+
+With bedMethyl (methyl-sQTL / methyl-eQTL — methylation as predictor):
 ```bash
 rust_fastqtl \
   -m example/methylation.bed.gz \
@@ -131,7 +164,7 @@ rust_fastqtl \
   -o permutation.txt
 ```
 
-With bedMethyl (mQTL):
+With bedMethyl (methyl-sQTL / methyl-eQTL):
 ```bash
 rust_fastqtl \
   -m example/methylation.bed.gz \
@@ -158,7 +191,13 @@ p_empirical  p_beta_adjusted
 
 ## bedMethyl format (`--bedmethyl`)
 
-A tab-separated methylation matrix file where rows are CpG (or other modified base) sites and columns 4+ are per-sample integer dosage values. This enables mQTL mapping — testing associations between methylation states and phenotypes (e.g. gene expression).
+A tab-separated methylation matrix file where rows are CpG (or other modified base) sites and columns 4+ are per-sample integer dosage values. Methylation is used as the **predictor** (analogous to SNP genotype), and the phenotype BED (`--bed`) is the **outcome**. Depending on the phenotype this enables:
+
+- **methyl-sQTL**: methylation → splicing
+- **methyl-eQTL**: methylation → gene expression
+- other phenotype types as appropriate
+
+> Note: standard **mQTL** (genetic variant → methylation) uses `--vcf` with a methylation phenotype BED, not `--bedmethyl`.
 
 Only **integer dosage encoding (0/1/2)** is supported:
 
@@ -206,12 +245,13 @@ The following differences from https://github.com/francois-a/fastqtl are known a
 | Conditional mapping | Implemented (`--mapping`) | Not implemented |
 | Interaction testing | Implemented (`--interaction`) | Not implemented |
 | Group-aware permutation | Implemented (`--grp`) | Not implemented |
-| Chunk/parallelisation | Via Python wrapper | Not implemented (run per-region) |
+| Chunk/parallelisation | Via Python wrapper | Native: pass multiple `-r` regions; processed in parallel with rayon |
 
 ---
 
 ## Dependencies
 
 - [`clap`](https://crates.io/crates/clap) 4.x — argument parsing
+- [`rayon`](https://crates.io/crates/rayon) 1.x — data-parallel region processing
 
-No other external crates. Math functions (lgamma, regularized incomplete beta, Nelder-Mead) are implemented from scratch.
+Math functions (lgamma, regularized incomplete beta, Nelder-Mead) are implemented from scratch.

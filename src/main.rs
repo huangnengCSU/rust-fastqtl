@@ -8,6 +8,7 @@ use std::process::{Child, ChildStdout, Command, Stdio};
 
 use clap::{ArgAction, Parser};
 use flate2::read::MultiGzDecoder;
+use rayon::prelude::*;
 
 #[derive(Debug, Parser)]
 #[command(name = "rust-fastqtl", about = "Fast cis-QTL mapper (Rust port of FastQTL)")]
@@ -25,17 +26,27 @@ struct Args {
     #[arg(short, long)]
     bed: String,
 
-    /// Output file path
+    /// Output file path (merged, all regions)
     #[arg(short, long)]
     out: String,
+
+    /// Output directory for per-region files (optional); each region is written to
+    /// <out-dir>/<region>.txt alongside the merged --out file
+    #[arg(long)]
+    out_dir: Option<String>,
 
     /// Covariate file (optional)
     #[arg(short, long)]
     cov: Option<String>,
 
-    /// Genomic region to analyse (chr:start-end or chr)
-    #[arg(short, long)]
-    region: String,
+    /// Genomic region(s) to analyse (chr:start-end or chr); may be specified multiple times
+    /// for parallel multi-region processing, e.g. -r chr1 -r chr2 or -r chr1:1-1000000
+    #[arg(short, long, num_args = 1..)]
+    region: Vec<String>,
+
+    /// Number of parallel threads (default: all available CPUs)
+    #[arg(short = 't', long, default_value_t = 0)]
+    threads: usize,
 
     /// Cis-window size in bp
     #[arg(short, long, default_value_t = 1_000_000)]
@@ -63,7 +74,7 @@ struct Args {
     #[arg(short, long, num_args = 1..=3)]
     permute: Option<Vec<usize>>,
 
-    /// Random seed
+    /// Random seed (each region gets seed + region_index for reproducibility)
     #[arg(long, default_value_t = 12345)]
     seed: u64,
 
@@ -82,6 +93,7 @@ struct Region {
 #[derive(Clone)]
 struct Phenotype {
     id: String,
+    chr: String,
     start: i32,
     end: i32,
     values: Vec<f64>,
@@ -252,7 +264,6 @@ fn open_vcf_reader(path: &str, region: &Region, window: i32) -> Result<Box<dyn B
 
 fn parse_bed(
     path: &str,
-    region: &Region,
 ) -> Result<(Vec<String>, Vec<Phenotype>, HashMap<String, usize>), Box<dyn Error>> {
     let mut reader = open_bufread(path)?;
     let mut line = String::new();
@@ -283,18 +294,10 @@ fn parse_bed(
             line.clear();
             continue;
         }
-        let chr = cols[0];
-        if chr != region.chr {
-            line.clear();
-            continue;
-        }
+        let chr = cols[0].to_string();
         let start0: i32 = cols[1].parse()?;
         let start1 = start0 + 1;
-        if start1 < region.start || start1 > region.end {
-            line.clear();
-            continue;
-        }
-        let end: i32 = cols[2].parse()?; // BED 0-based exclusive = 1-based inclusive end
+        let end: i32 = cols[2].parse()?;
 
         let id = cols[3].to_string();
         let mut values = Vec::with_capacity(samples.len());
@@ -308,6 +311,7 @@ fn parse_bed(
 
         phenotypes.push(Phenotype {
             id,
+            chr,
             start: start1,
             end,
             values,
@@ -1143,7 +1147,7 @@ fn dist_to_body(g_pos: i32, p_start: i32, p_end: i32) -> i32 {
 }
 
 fn run_nominal(
-    out_path: &str,
+    out: &mut dyn Write,
     phenotypes: &[Phenotype],
     genotypes: &[Genotype],
     cis_window: i32,
@@ -1151,7 +1155,6 @@ fn run_nominal(
     threshold: f64,
     n_cov: usize,
 ) -> Result<(), Box<dyn Error>> {
-    let mut out = BufWriter::new(File::create(out_path)?);
 
     for p in phenotypes {
         for g in genotypes {
@@ -1190,7 +1193,7 @@ fn run_nominal(
 }
 
 fn run_permutation(
-    out_path: &str,
+    out: &mut dyn Write,
     phenotypes: &[Phenotype],
     genotypes: &[Genotype],
     cis_window: i32,
@@ -1199,7 +1202,6 @@ fn run_permutation(
     permute: &[usize],
     seed: u64,
 ) -> Result<(), Box<dyn Error>> {
-    let mut out = BufWriter::new(File::create(out_path)?);
     let mut rng = XorShift64::new(seed);
 
     for (pi, p) in phenotypes.iter().enumerate() {
@@ -1337,6 +1339,127 @@ fn run_permutation(
     Ok(())
 }
 
+/// Per-region processing; returns raw output bytes for that region.
+/// Errors are returned as String so they are Send-safe across rayon threads.
+fn process_region(
+    region: &Region,
+    region_idx: usize,
+    all_phenotypes: &[Phenotype],
+    sample_index: &HashMap<String, usize>,
+    n_samples: usize,
+    covariates: &[Vec<f64>],
+    args: &Args,
+) -> Result<(String, Vec<u8>), String> {
+    let region_label = if region.end >= 1_000_000_000 {
+        region.chr.clone()
+    } else {
+        format!("{}:{}-{}", region.chr, region.start, region.end)
+    };
+
+    // Filter phenotypes for this region
+    let mut phenotypes: Vec<Phenotype> = all_phenotypes
+        .iter()
+        .filter(|p| {
+            p.chr == region.chr && p.start >= region.start && p.start <= region.end
+        })
+        .cloned()
+        .collect();
+
+    if phenotypes.is_empty() {
+        eprintln!("warning: no phenotypes found in region {}", region_label);
+        return Ok((region_label, Vec::new()));
+    }
+
+    for p in &mut phenotypes {
+        impute_nan(&mut p.values);
+        if args.normal {
+            rank_normalize(&mut p.values);
+        }
+    }
+
+    let mut genotypes = if let Some(vcf_path) = args.vcf.as_ref() {
+        parse_vcf(
+            vcf_path,
+            region,
+            args.window,
+            sample_index,
+            n_samples,
+            args.maf_threshold,
+            args.ma_sample_threshold,
+        )
+        .map_err(|e| format!("[{}] VCF parse error: {}", region_label, e))?
+    } else {
+        let gbed_path = args.bedmethyl.as_ref().unwrap();
+        parse_genotype_bed(
+            gbed_path,
+            region,
+            args.window,
+            sample_index,
+            n_samples,
+            args.maf_threshold,
+            args.ma_sample_threshold,
+        )
+        .map_err(|e| format!("[{}] bedmethyl parse error: {}", region_label, e))?
+    };
+
+    if genotypes.is_empty() {
+        eprintln!(
+            "warning: no genotypes in region {} after filters",
+            region_label
+        );
+        return Ok((region_label, Vec::new()));
+    }
+
+    let residualizer = Residualizer::new(covariates, n_samples);
+
+    for g in &mut genotypes {
+        residualizer.residualize(&mut g.values);
+        g.sd = stddev(&g.values);
+        normalize(&mut g.values);
+    }
+    for p in &mut phenotypes {
+        residualizer.residualize(&mut p.values);
+        p.sd = stddev(&p.values);
+        normalize(&mut p.values);
+    }
+
+    let mut buf: Vec<u8> = Vec::new();
+
+    if let Some(permute) = args.permute.as_ref() {
+        // Each region gets a deterministic but distinct seed
+        let seed = args.seed.wrapping_add(region_idx as u64);
+        run_permutation(
+            &mut buf,
+            &phenotypes,
+            &genotypes,
+            args.window,
+            args.min_window,
+            covariates.len(),
+            permute,
+            seed,
+        )
+        .map_err(|e| format!("[{}] permutation error: {}", region_label, e))?;
+    } else {
+        run_nominal(
+            &mut buf,
+            &phenotypes,
+            &genotypes,
+            args.window,
+            args.min_window,
+            args.threshold,
+            covariates.len(),
+        )
+        .map_err(|e| format!("[{}] nominal error: {}", region_label, e))?;
+    }
+
+    eprintln!(
+        "[{}] done: phenotypes={}, genotypes={}", region_label,
+        phenotypes.len(), genotypes.len()
+    );
+
+    Ok((region_label, buf))
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
     if args.window <= 0 {
@@ -1354,19 +1477,28 @@ fn main() -> Result<(), Box<dyn Error>> {
     if !(0.0..0.5).contains(&args.maf_threshold) {
         return Err("--maf-threshold must satisfy 0 <= x < 0.5".into());
     }
-
-    let region = parse_region(&args.region)?;
-
-    let (samples, mut phenotypes, sample_index) = parse_bed(&args.bed, &region)?;
-    if phenotypes.is_empty() {
-        return Err("no phenotypes found in selected region".into());
+    if args.region.is_empty() {
+        return Err("at least one --region must be specified".into());
     }
 
-    for p in &mut phenotypes {
-        impute_nan(&mut p.values);
-        if args.normal {
-            rank_normalize(&mut p.values);
-        }
+    // Configure rayon thread pool
+    if args.threads > 0 {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(args.threads)
+            .build_global()
+            .map_err(|e| format!("failed to build thread pool: {}", e))?;
+    }
+
+    let regions: Vec<Region> = args
+        .region
+        .iter()
+        .map(|s| parse_region(s))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Load ALL phenotypes once (filtered per region in parallel)
+    let (samples, all_phenotypes, sample_index) = parse_bed(&args.bed)?;
+    if all_phenotypes.is_empty() {
+        return Err("no phenotypes found in BED file".into());
     }
 
     let covariates = if let Some(cov_path) = args.cov.as_ref() {
@@ -1375,76 +1507,54 @@ fn main() -> Result<(), Box<dyn Error>> {
         Vec::new()
     };
 
-    let mut genotypes = if let Some(vcf_path) = args.vcf.as_ref() {
-        parse_vcf(
-            vcf_path,
-            &region,
-            args.window,
-            &sample_index,
-            samples.len(),
-            args.maf_threshold,
-            args.ma_sample_threshold,
-        )?
-    } else {
-        let gbed_path = args.bedmethyl.as_ref().unwrap();
-        parse_genotype_bed(
-            gbed_path,
-            &region,
-            args.window,
-            &sample_index,
-            samples.len(),
-            args.maf_threshold,
-            args.ma_sample_threshold,
-        )?
-    };
-    if genotypes.is_empty() {
-        eprintln!("warning: no genotypes found in selected cis window after filters; writing empty output");
-        File::create(&args.out)?;
-        return Ok(());
-    }
-
-    let residualizer = Residualizer::new(&covariates, samples.len());
-
-    for g in &mut genotypes {
-        residualizer.residualize(&mut g.values);
-        g.sd = stddev(&g.values);
-        normalize(&mut g.values);
-    }
-    for p in &mut phenotypes {
-        residualizer.residualize(&mut p.values);
-        p.sd = stddev(&p.values);
-        normalize(&mut p.values);
-    }
-
-    if let Some(permute) = args.permute.as_ref() {
-        run_permutation(
-            &args.out,
-            &phenotypes,
-            &genotypes,
-            args.window,
-            args.min_window,
-            covariates.len(),
-            permute,
-            args.seed,
-        )?;
-    } else {
-        run_nominal(
-            &args.out,
-            &phenotypes,
-            &genotypes,
-            args.window,
-            args.min_window,
-            args.threshold,
-            covariates.len(),
-        )?;
-    }
-
     eprintln!(
-        "done: phenotypes={}, genotypes={}, covariates={}",
-        phenotypes.len(),
-        genotypes.len(),
-        covariates.len()
+        "loaded {} phenotypes, {} covariates, processing {} region(s) with {} thread(s)",
+        all_phenotypes.len(),
+        covariates.len(),
+        regions.len(),
+        if args.threads == 0 {
+            rayon::current_num_threads()
+        } else {
+            args.threads
+        }
     );
+
+    // Create per-region output directory if requested
+    if let Some(dir) = &args.out_dir {
+        std::fs::create_dir_all(dir)?;
+    }
+
+    // Process regions in parallel; collect results in input order
+    let results: Vec<Result<(String, Vec<u8>), String>> = regions
+        .par_iter()
+        .enumerate()
+        .map(|(ri, region)| {
+            process_region(
+                region,
+                ri,
+                &all_phenotypes,
+                &sample_index,
+                samples.len(),
+                &covariates,
+                &args,
+            )
+        })
+        .collect();
+
+    // Write outputs: merged file always; per-region files if --out-dir is set
+    let mut merged = BufWriter::new(File::create(&args.out)?);
+    for result in results {
+        let (label, bytes) = result.map_err(|e| -> Box<dyn Error> { e.into() })?;
+        merged.write_all(&bytes)?;
+
+        if let Some(dir) = &args.out_dir {
+            // Sanitise label for use as filename: replace ':' with '_'
+            let fname = label.replace(':', "_");
+            let path = std::path::Path::new(dir).join(format!("{}.txt", fname));
+            let mut f = BufWriter::new(File::create(path)?);
+            f.write_all(&bytes)?;
+        }
+    }
 
     Ok(())
 }
