@@ -678,11 +678,17 @@ fn slope(c: f64, psd: f64, gsd: f64) -> f64 {
 }
 
 fn tstat2(c: f64, df: f64) -> f64 {
-    let den = 1.0 - c * c;
+    let c_abs = c.abs().min(1.0);
+    let den_fma = (-c_abs).mul_add(c_abs, 1.0);
+    let den = if den_fma > 0.0 {
+        den_fma
+    } else {
+        (1.0 - c_abs) * (1.0 + c_abs)
+    };
     if den <= 0.0 {
         f64::INFINITY
     } else {
-        df * c * c / den
+        df * c_abs * c_abs / den
     }
 }
 
@@ -761,8 +767,8 @@ fn pvalue_from_tstat2(t2: f64, df: f64) -> f64 {
     if !t2.is_finite() {
         return 0.0;
     }
-    let c2 = t2 / (t2 + df);
-    pbeta(1.0 - c2, df / 2.0, 0.5)
+    let x = df / (t2 + df);
+    pbeta(x, df / 2.0, 0.5)
 }
 
 // --- Regularized incomplete beta and helpers (for exact F-dist p-values and pbeta) ---
@@ -796,8 +802,8 @@ fn lgamma(x: f64) -> f64 {
 fn betacf(a: f64, b: f64, x: f64) -> f64 {
     // Continued fraction for regularized incomplete beta (Lentz's method)
     const MAXIT: usize = 200;
-    const EPS: f64 = 3.0e-7;
-    const FPMIN: f64 = 1.0e-30;
+    const EPS: f64 = 3.0e-12;
+    const FPMIN: f64 = 1.0e-300;
     let qab = a + b;
     let qap = a + 1.0;
     let qam = a - 1.0;
@@ -834,21 +840,38 @@ fn pbeta(x: f64, a: f64, b: f64) -> f64 {
     if x <= 0.0 { return 0.0; }
     if x >= 1.0 { return 1.0; }
     let lbeta_ab = lgamma(a) + lgamma(b) - lgamma(a + b);
+    let log_bt = a * x.ln() + b * (-x).ln_1p() - lbeta_ab;
+    let log_min = f64::MIN_POSITIVE.ln();
     if x < (a + 1.0) / (a + b + 2.0) {
-        let front = (a * x.ln() + b * (1.0 - x).ln() - lbeta_ab).exp() / a;
-        (front * betacf(a, b, x)).clamp(0.0, 1.0)
+        let cf = betacf(a, b, x);
+        if !cf.is_finite() || cf <= 0.0 {
+            return 0.0;
+        }
+        let log_p = log_bt - a.ln() + cf.ln();
+        if log_p <= log_min {
+            0.0
+        } else {
+            log_p.exp().clamp(0.0, 1.0)
+        }
     } else {
-        let front = (b * (1.0 - x).ln() + a * x.ln() - lbeta_ab).exp() / b;
-        (1.0 - front * betacf(b, a, 1.0 - x)).clamp(0.0, 1.0)
+        let cf = betacf(b, a, 1.0 - x);
+        if !cf.is_finite() || cf <= 0.0 {
+            return 1.0;
+        }
+        let log_q = log_bt - b.ln() + cf.ln();
+        if log_q <= log_min {
+            1.0
+        } else {
+            let q = log_q.exp();
+            (1.0 - q).clamp(0.0, 1.0)
+        }
     }
 }
 
 fn pvalue_from_corr_f(c: f64, df: f64) -> f64 {
     // Exact F(1, df) p-value from Pearson correlation c:
     //   P(F(1,df) > df*c²/(1-c²)) = I_{1-c²}(df/2, 1/2)
-    let c2 = c * c;
-    if c2 >= 1.0 { return 0.0; }
-    pbeta(1.0 - c2, df / 2.0, 0.5)
+    pvalue_from_tstat2(tstat2(c, df), df)
 }
 
 // --- Nelder-Mead minimiser (2-D, derivative-free) ---
