@@ -33,16 +33,16 @@ if (ncol(nom) != 10) {
 
 setnames(nom, c(
   "phenotype_id", "variant_id", "distance", "distance_to_body", "ma_samples",
-  "ma_count", "maf", "pval", "beta", "beta_se"
+  "ma_count", "maf", "pval_nominal", "beta", "beta_se"
 ))
 
 message("[3/4] Merging and filtering")
 res <- merge(nom, thr_sig, by = "phenotype_id", all = FALSE)
-sig_pairs <- res[pval <= pval_nominal_threshold]
+sig_pairs <- res[pval_nominal <= pval_nominal_threshold]
 
 setcolorder(sig_pairs, c(
   "phenotype_id", "variant_id", "distance", "distance_to_body", "ma_samples", "ma_count",
-  "maf", "pval", "pval_nominal_threshold", "qval", "beta", "beta_se"
+  "maf", "pval_nominal", "pval_nominal_threshold", "qval", "beta", "beta_se"
 ))
 
 message("[4/4] Writing output: ", out_file)
