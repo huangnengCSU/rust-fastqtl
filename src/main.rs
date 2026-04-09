@@ -929,6 +929,61 @@ fn nelder_mead_2d<F: Fn(f64, f64) -> f64>(
     else { pts[2] }
 }
 
+fn nelder_mead_1d<F: Fn(f64) -> f64>(
+    f: F,
+    x0: f64,
+    step: f64,
+    tol: f64,
+    max_iter: usize,
+) -> f64 {
+    let mut pts = [x0, x0 + step.max(1e-6)];
+    let mut fv = [f(pts[0]), f(pts[1])];
+
+    for _ in 0..max_iter {
+        if fv[0] > fv[1] {
+            pts.swap(0, 1);
+            fv.swap(0, 1);
+        }
+        let size = (pts[1] - pts[0]).abs();
+        if size < tol {
+            break;
+        }
+
+        let xr = 2.0 * pts[0] - pts[1];
+        let fr = f(xr);
+        if fr < fv[0] {
+            let xe = 3.0 * pts[0] - 2.0 * pts[1];
+            let fe = f(xe);
+            if fe < fr {
+                pts[1] = xe;
+                fv[1] = fe;
+            } else {
+                pts[1] = xr;
+                fv[1] = fr;
+            }
+        } else if fr < fv[1] {
+            pts[1] = xr;
+            fv[1] = fr;
+        } else {
+            let xc = 0.5 * (pts[0] + pts[1]);
+            let fc = f(xc);
+            if fc <= fv[1] {
+                pts[1] = xc;
+                fv[1] = fc;
+            } else {
+                pts[1] = 0.5 * (pts[0] + pts[1]);
+                fv[1] = f(pts[1]);
+            }
+        }
+    }
+
+    if fv[0] <= fv[1] {
+        pts[0]
+    } else {
+        pts[1]
+    }
+}
+
 // --- Beta distribution MLE via Nelder-Mead ---
 
 fn mle_beta(pvals: &[f64], shape1_init: f64, shape2_init: f64) -> (f64, f64) {
@@ -975,11 +1030,16 @@ fn fit_beta(pvals: &[f64], n_variants: usize) -> (f64, f64) {
     }
 }
 
-// Golden-section search for effective degrees of freedom (matches C++ learnDF)
+// 1-D Nelder-Mead search for effective degrees of freedom (FastQTL-like learnDF)
 fn learn_df(corrs: &[f64], df_init: f64) -> f64 {
-    if corrs.len() < 2 { return df_init; }
+    if corrs.len() < 2 {
+        return df_init;
+    }
     let n = corrs.len() as f64;
     let objective = |df: f64| -> f64 {
+        if !df.is_finite() || df <= 0.0 {
+            return 1e10;
+        }
         let mean = corrs.iter().map(|&c| pvalue_from_corr_f(c, df)).sum::<f64>() / n;
         let var = corrs.iter()
             .map(|&c| { let p = pvalue_from_corr_f(c, df); (p - mean).powi(2) })
@@ -988,27 +1048,19 @@ fn learn_df(corrs: &[f64], df_init: f64) -> f64 {
         let shape1 = mean * (mean * (1.0 - mean) / var - 1.0);
         (shape1 - 1.0).abs()
     };
-    // Golden-section search over [1, max(3*df_init, 100)]
-    let phi = (5.0_f64.sqrt() - 1.0) / 2.0;
-    let mut lo = 1.0_f64;
-    let mut hi = (3.0 * df_init).max(100.0);
-    let mut x1 = hi - phi * (hi - lo);
-    let mut x2 = lo + phi * (hi - lo);
-    let mut f1 = objective(x1);
-    let mut f2 = objective(x2);
-    for _ in 0..50 {
-        if hi - lo < 0.01 { break; }
-        if f1 < f2 {
-            hi = x2; x2 = x1; f2 = f1;
-            x1 = hi - phi * (hi - lo);
-            f1 = objective(x1);
-        } else {
-            lo = x1; x1 = x2; f1 = f2;
-            x2 = lo + phi * (hi - lo);
-            f2 = objective(x2);
-        }
+
+    let x0 = if df_init.is_finite() && df_init > 0.0 {
+        df_init
+    } else {
+        1.0
+    };
+    let step = (x0 * 0.1).max(1e-6);
+    let df = nelder_mead_1d(objective, x0, step, 0.01, 20);
+    if df.is_finite() && df > 0.0 {
+        df
+    } else {
+        x0
     }
-    (lo + hi) / 2.0
 }
 
 fn rank_normalize(v: &mut [f64]) {
