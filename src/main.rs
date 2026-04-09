@@ -112,8 +112,8 @@ struct Genotype {
 }
 
 struct Residualizer {
-    x: Vec<Vec<f64>>, // n_samples x p
-    xtx_inv: Option<Vec<Vec<f64>>>,
+    basis: Vec<Vec<f64>>, // orthonormal basis vectors (length = n_samples)
+    n_covariates: usize,  // effective covariates after dropping dependent columns (excludes intercept)
 }
 
 struct XorShift64 {
@@ -1040,121 +1040,84 @@ fn rank_normalize(v: &mut [f64]) {
     }
 }
 
-fn invert_matrix(mut a: Vec<Vec<f64>>) -> Option<Vec<Vec<f64>>> {
-    let n = a.len();
-    if n == 0 || a[0].len() != n {
-        return None;
-    }
-
-    let mut inv = vec![vec![0.0; n]; n];
-    for (i, row) in inv.iter_mut().enumerate().take(n) {
-        row[i] = 1.0;
-    }
-
-    for i in 0..n {
-        let mut pivot = i;
-        let mut best = a[i][i].abs();
-        for (r, row) in a.iter().enumerate().take(n).skip(i + 1) {
-            if row[i].abs() > best {
-                best = row[i].abs();
-                pivot = r;
-            }
-        }
-        if best < 1e-12 {
-            return None;
-        }
-        if pivot != i {
-            a.swap(i, pivot);
-            inv.swap(i, pivot);
-        }
-
-        let d = a[i][i];
-        for c in 0..n {
-            a[i][c] /= d;
-            inv[i][c] /= d;
-        }
-
-        for r in 0..n {
-            if r == i {
-                continue;
-            }
-            let f = a[r][i];
-            if f == 0.0 {
-                continue;
-            }
-            for c in 0..n {
-                a[r][c] -= f * a[i][c];
-                inv[r][c] -= f * inv[i][c];
-            }
-        }
-    }
-
-    Some(inv)
-}
-
 impl Residualizer {
     fn new(covariates: &[Vec<f64>], n_samples: usize) -> Self {
-        if covariates.is_empty() {
+        if n_samples == 0 {
             return Self {
-                x: Vec::new(),
-                xtx_inv: None,
+                basis: Vec::new(),
+                n_covariates: 0,
             };
         }
 
-        let p = covariates.len() + 1;
-        let mut x = vec![vec![0.0; p]; n_samples];
-        for i in 0..n_samples {
-            x[i][0] = 1.0;
-            for (j, cov) in covariates.iter().enumerate() {
-                x[i][j + 1] = cov[i];
-            }
+        let mut columns: Vec<(Vec<f64>, bool)> = Vec::with_capacity(covariates.len() + 1);
+        columns.push((vec![1.0; n_samples], true));
+        for cov in covariates {
+            columns.push((cov.clone(), false));
         }
 
-        let mut xtx = vec![vec![0.0; p]; p];
-        for i in 0..p {
-            for j in 0..p {
-                let mut s = 0.0;
-                for row in x.iter().take(n_samples) {
-                    s += row[i] * row[j];
+        let mut basis: Vec<Vec<f64>> = Vec::new();
+        let mut kept_covariates = 0usize;
+        let tol2 = 1e-12 * n_samples as f64;
+
+        while !columns.is_empty() {
+            let mut best_idx = 0usize;
+            let mut best_vec: Vec<f64> = Vec::new();
+            let mut best_is_intercept = false;
+            let mut best_norm2 = -1.0_f64;
+
+            for (idx, (col, is_intercept)) in columns.iter().enumerate() {
+                let mut v = col.clone();
+                for q in &basis {
+                    let dot = v.iter().zip(q.iter()).map(|(a, b)| a * b).sum::<f64>();
+                    for i in 0..n_samples {
+                        v[i] -= dot * q[i];
+                    }
                 }
-                xtx[i][j] = s;
+                let norm2 = v.iter().map(|x| x * x).sum::<f64>();
+                if norm2 > best_norm2 {
+                    best_norm2 = norm2;
+                    best_idx = idx;
+                    best_vec = v;
+                    best_is_intercept = *is_intercept;
+                }
+            }
+
+            if best_norm2 <= tol2 {
+                break;
+            }
+
+            columns.swap_remove(best_idx);
+
+            let norm = best_norm2.sqrt();
+            for x in &mut best_vec {
+                *x /= norm;
+            }
+            basis.push(best_vec);
+            if !best_is_intercept {
+                kept_covariates += 1;
             }
         }
 
-        let xtx_inv = invert_matrix(xtx);
-        Self { x, xtx_inv }
+        Self {
+            basis,
+            n_covariates: kept_covariates,
+        }
     }
 
     fn residualize(&self, y: &mut [f64]) {
-        let Some(inv) = &self.xtx_inv else {
+        if self.basis.is_empty() {
             return;
-        };
-
-        let n = y.len();
-        let p = inv.len();
-        let mut xty = vec![0.0; p];
-        for (j, xj) in xty.iter_mut().enumerate().take(p) {
-            let mut s = 0.0;
-            for (i, yi) in y.iter().enumerate().take(n) {
-                s += self.x[i][j] * yi;
-            }
-            *xj = s;
         }
-
-        let mut beta = vec![0.0; p];
-        for i in 0..p {
-            for (j, xty_j) in xty.iter().enumerate().take(p) {
-                beta[i] += inv[i][j] * xty_j;
+        for q in &self.basis {
+            let dot = y.iter().zip(q.iter()).map(|(a, b)| a * b).sum::<f64>();
+            for i in 0..y.len() {
+                y[i] -= dot * q[i];
             }
         }
+    }
 
-        for (i, yi) in y.iter_mut().enumerate().take(n) {
-            let mut fit = 0.0;
-            for (j, bj) in beta.iter().enumerate().take(p) {
-                fit += self.x[i][j] * bj;
-            }
-            *yi -= fit;
-        }
+    fn n_covariates(&self) -> usize {
+        self.n_covariates
     }
 }
 
@@ -1438,6 +1401,7 @@ fn process_region(
     }
 
     let residualizer = Residualizer::new(covariates, n_samples);
+    let n_cov_effective = residualizer.n_covariates();
 
     for g in &mut genotypes {
         residualizer.residualize(&mut g.values);
@@ -1462,7 +1426,7 @@ fn process_region(
             &genotypes,
             args.window,
             args.min_window,
-            covariates.len(),
+            n_cov_effective,
             &residualizer,
             permute,
             seed,
@@ -1476,7 +1440,7 @@ fn process_region(
             args.window,
             args.min_window,
             args.threshold,
-            covariates.len(),
+            n_cov_effective,
         )
         .map_err(|e| format!("[{}] nominal error: {}", region_label, e))?;
     }
