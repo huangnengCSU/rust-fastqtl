@@ -1218,10 +1218,12 @@ fn run_nominal(
 fn run_permutation(
     out: &mut dyn Write,
     phenotypes: &[Phenotype],
+    phenotype_raw_values: &[Vec<f64>],
     genotypes: &[Genotype],
     cis_window: i32,
     min_window: i32,
     n_cov: usize,
+    residualizer: &Residualizer,
     permute: &[usize],
     seed: u64,
 ) -> Result<(), Box<dyn Error>> {
@@ -1270,8 +1272,9 @@ fn run_permutation(
         let mut perm_corrs: Vec<f64> = Vec::new();
 
         loop {
-            yperm.copy_from_slice(&p.values);
+            yperm.copy_from_slice(&phenotype_raw_values[pi]);
             rng.shuffle(&mut yperm);
+            residualizer.residualize(&mut yperm);
             normalize(&mut yperm);
 
             let mut best_pcorr: f64 = 0.0;
@@ -1399,6 +1402,7 @@ fn process_region(
             rank_normalize(&mut p.values);
         }
     }
+    let phenotype_raw_values: Vec<Vec<f64>> = phenotypes.iter().map(|p| p.values.clone()).collect();
 
     let mut genotypes = if let Some(vcf_path) = args.vcf.as_ref() {
         parse_vcf(
@@ -1454,10 +1458,12 @@ fn process_region(
         run_permutation(
             &mut buf,
             &phenotypes,
+            &phenotype_raw_values,
             &genotypes,
             args.window,
             args.min_window,
             covariates.len(),
+            &residualizer,
             permute,
             seed,
         )
