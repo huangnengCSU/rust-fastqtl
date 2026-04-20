@@ -125,6 +125,35 @@ struct ChildBufRead {
     stdout: BufReader<ChildStdout>,
 }
 
+struct TeeWriter<'a> {
+    primary: &'a mut dyn Write,
+    secondary: Option<&'a mut dyn Write>,
+}
+
+impl<'a> TeeWriter<'a> {
+    fn new(primary: &'a mut dyn Write, secondary: Option<&'a mut dyn Write>) -> Self {
+        Self { primary, secondary }
+    }
+}
+
+impl Write for TeeWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.primary.write(buf)?;
+        if let Some(secondary) = self.secondary.as_mut() {
+            secondary.write_all(&buf[..written])?;
+        }
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.primary.flush()?;
+        if let Some(secondary) = self.secondary.as_mut() {
+            secondary.flush()?;
+        }
+        Ok(())
+    }
+}
+
 impl ChildBufRead {
     fn spawn(command: &str, args: &[&str]) -> Result<Self, Box<dyn Error>> {
         let mut child = Command::new(command)
@@ -1417,7 +1446,6 @@ fn process_region(
             rank_normalize(&mut p.values);
         }
     }
-    let phenotype_raw_values: Vec<Vec<f64>> = phenotypes.iter().map(|p| p.values.clone()).collect();
 
     let mut genotypes = if let Some(vcf_path) = args.vcf.as_ref() {
         parse_vcf(
@@ -1469,6 +1497,8 @@ fn process_region(
     let mut buf: Vec<u8> = Vec::new();
 
     if let Some(permute) = args.permute.as_ref() {
+        let phenotype_raw_values: Vec<Vec<f64>> =
+            phenotypes.iter().map(|p| p.values.clone()).collect();
         // Each region gets a deterministic but distinct seed
         let seed = args.seed.wrapping_add(region_idx as u64);
         run_permutation(
@@ -1503,6 +1533,109 @@ fn process_region(
     );
 
     Ok((region_label, buf))
+}
+
+fn process_region_nominal_stream<'a>(
+    region: &Region,
+    all_phenotypes: &[Phenotype],
+    sample_index: &HashMap<String, usize>,
+    n_samples: usize,
+    covariates: &[Vec<f64>],
+    args: &Args,
+    merged_out: &'a mut dyn Write,
+    region_out: Option<&'a mut dyn Write>,
+) -> Result<String, String> {
+    let region_label = if region.end >= 1_000_000_000 {
+        region.chr.clone()
+    } else {
+        format!("{}:{}-{}", region.chr, region.start, region.end)
+    };
+
+    let mut phenotypes: Vec<Phenotype> = all_phenotypes
+        .iter()
+        .filter(|p| p.chr == region.chr && p.start >= region.start && p.start <= region.end)
+        .cloned()
+        .collect();
+
+    if phenotypes.is_empty() {
+        eprintln!("warning: no phenotypes found in region {}", region_label);
+        return Ok(region_label);
+    }
+
+    for p in &mut phenotypes {
+        impute_nan(&mut p.values);
+        if args.normal {
+            rank_normalize(&mut p.values);
+        }
+    }
+
+    let mut genotypes = if let Some(vcf_path) = args.vcf.as_ref() {
+        parse_vcf(
+            vcf_path,
+            region,
+            args.window,
+            sample_index,
+            n_samples,
+            args.maf_threshold,
+            args.ma_sample_threshold,
+        )
+        .map_err(|e| format!("[{}] VCF parse error: {}", region_label, e))?
+    } else {
+        let gbed_path = args.bedmethyl.as_ref().unwrap();
+        parse_genotype_bed(
+            gbed_path,
+            region,
+            args.window,
+            sample_index,
+            n_samples,
+            args.maf_threshold,
+            args.ma_sample_threshold,
+        )
+        .map_err(|e| format!("[{}] bedmethyl parse error: {}", region_label, e))?
+    };
+
+    if genotypes.is_empty() {
+        eprintln!(
+            "warning: no genotypes in region {} after filters",
+            region_label
+        );
+        return Ok(region_label);
+    }
+
+    let residualizer = Residualizer::new(covariates, n_samples);
+    let n_cov_effective = residualizer.n_covariates();
+
+    for g in &mut genotypes {
+        residualizer.residualize(&mut g.values);
+        g.sd = stddev(&g.values);
+        normalize(&mut g.values);
+    }
+    for p in &mut phenotypes {
+        residualizer.residualize(&mut p.values);
+        p.sd = stddev(&p.values);
+        normalize(&mut p.values);
+    }
+
+    let mut out = TeeWriter::new(merged_out, region_out);
+    run_nominal(
+        &mut out,
+        &phenotypes,
+        &genotypes,
+        args.window,
+        args.min_window,
+        args.threshold,
+        n_cov_effective,
+    )
+    .map_err(|e| format!("[{}] nominal error: {}", region_label, e))?;
+
+    eprintln!(
+        "[{}] done: phenotypes={}, genotypes={}",
+        region_label,
+        phenotypes.len(),
+        genotypes.len()
+    );
+
+    Ok(region_label)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -1569,35 +1702,76 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::fs::create_dir_all(dir)?;
     }
 
-    // Process regions in parallel; collect results in input order
-    let results: Vec<Result<(String, Vec<u8>), String>> = regions
-        .par_iter()
-        .enumerate()
-        .map(|(ri, region)| {
-            process_region(
-                region,
-                ri,
-                &all_phenotypes,
-                &sample_index,
-                samples.len(),
-                &covariates,
-                &args,
-            )
-        })
-        .collect();
+    if args.permute.is_some() {
+        // Process regions in parallel; collect results in input order.
+        // Permutation output is compact (one line per phenotype), so buffering per region is acceptable.
+        let results: Vec<Result<(String, Vec<u8>), String>> = regions
+            .par_iter()
+            .enumerate()
+            .map(|(ri, region)| {
+                process_region(
+                    region,
+                    ri,
+                    &all_phenotypes,
+                    &sample_index,
+                    samples.len(),
+                    &covariates,
+                    &args,
+                )
+            })
+            .collect();
 
-    // Write outputs: merged file always; per-region files if --out-dir is set
-    let mut merged = BufWriter::new(File::create(&args.out)?);
-    for result in results {
-        let (label, bytes) = result.map_err(|e| -> Box<dyn Error> { e.into() })?;
-        merged.write_all(&bytes)?;
+        // Write outputs: merged file always; per-region files if --out-dir is set
+        let mut merged = BufWriter::new(File::create(&args.out)?);
+        for result in results {
+            let (label, bytes) = result.map_err(|e| -> Box<dyn Error> { e.into() })?;
+            merged.write_all(&bytes)?;
 
-        if let Some(dir) = &args.out_dir {
-            // Sanitise label for use as filename: replace ':' with '_'
-            let fname = label.replace(':', "_");
-            let path = std::path::Path::new(dir).join(format!("{}.txt", fname));
-            let mut f = BufWriter::new(File::create(path)?);
-            f.write_all(&bytes)?;
+            if let Some(dir) = &args.out_dir {
+                // Sanitise label for use as filename: replace ':' with '_'
+                let fname = label.replace(':', "_");
+                let path = std::path::Path::new(dir).join(format!("{}.txt", fname));
+                let mut f = BufWriter::new(File::create(path)?);
+                f.write_all(&bytes)?;
+            }
+        }
+    } else {
+        // Nominal pass can produce huge output; stream directly to disk to avoid unbounded memory.
+        let mut merged = BufWriter::new(File::create(&args.out)?);
+        for region in &regions {
+            if let Some(dir) = &args.out_dir {
+                let label = if region.end >= 1_000_000_000 {
+                    region.chr.clone()
+                } else {
+                    format!("{}:{}-{}", region.chr, region.start, region.end)
+                };
+                let fname = label.replace(':', "_");
+                let path = std::path::Path::new(dir).join(format!("{}.txt", fname));
+                let mut region_writer = BufWriter::new(File::create(path)?);
+                process_region_nominal_stream(
+                    region,
+                    &all_phenotypes,
+                    &sample_index,
+                    samples.len(),
+                    &covariates,
+                    &args,
+                    &mut merged,
+                    Some(&mut region_writer),
+                )
+                .map_err(|e| -> Box<dyn Error> { e.into() })?;
+            } else {
+                process_region_nominal_stream(
+                    region,
+                    &all_phenotypes,
+                    &sample_index,
+                    samples.len(),
+                    &covariates,
+                    &args,
+                    &mut merged,
+                    None,
+                )
+                .map_err(|e| -> Box<dyn Error> { e.into() })?;
+            }
         }
     }
 
