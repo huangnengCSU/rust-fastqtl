@@ -6,8 +6,6 @@ A Rust reimplementation of the core FastQTL cis-QTL mapping logic.
 
 **Reimplemented by:** GPT-5.3-codex and Claude-sonnet-4.6
 
-> **Warning:** The numerical outputs of `rust-fastqtl` have not been formally evaluated against the original FastQTL. Results may differ due to implementation differences described in the [Known differences](#known-differences) section below. Use with caution and validate before drawing conclusions.
-
 ---
 
 ## Features
