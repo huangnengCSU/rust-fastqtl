@@ -1736,6 +1736,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         .open(&args.out)?,
                 );
                 std::io::copy(&mut region_reader, &mut merged)?;
+                merged.flush()?;
             } else {
                 let mut merged = BufWriter::new(
                     OpenOptions::new()
@@ -1752,6 +1753,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     &mut merged,
                 )
                 .map_err(|e| -> Box<dyn Error> { e.into() })?;
+                merged.flush()?;
             }
         }
     }
