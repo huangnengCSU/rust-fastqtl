@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::error::Error;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdout, Command, Stdio};
@@ -123,35 +123,6 @@ struct XorShift64 {
 struct ChildBufRead {
     child: Child,
     stdout: BufReader<ChildStdout>,
-}
-
-struct TeeWriter<'a> {
-    primary: &'a mut dyn Write,
-    secondary: Option<&'a mut dyn Write>,
-}
-
-impl<'a> TeeWriter<'a> {
-    fn new(primary: &'a mut dyn Write, secondary: Option<&'a mut dyn Write>) -> Self {
-        Self { primary, secondary }
-    }
-}
-
-impl Write for TeeWriter<'_> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let written = self.primary.write(buf)?;
-        if let Some(secondary) = self.secondary.as_mut() {
-            secondary.write_all(&buf[..written])?;
-        }
-        Ok(written)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.primary.flush()?;
-        if let Some(secondary) = self.secondary.as_mut() {
-            secondary.flush()?;
-        }
-        Ok(())
-    }
 }
 
 impl ChildBufRead {
@@ -1542,8 +1513,7 @@ fn process_region_nominal_stream<'a>(
     n_samples: usize,
     covariates: &[Vec<f64>],
     args: &Args,
-    merged_out: &'a mut dyn Write,
-    region_out: Option<&'a mut dyn Write>,
+    out: &'a mut dyn Write,
 ) -> Result<String, String> {
     let region_label = if region.end >= 1_000_000_000 {
         region.chr.clone()
@@ -1616,9 +1586,8 @@ fn process_region_nominal_stream<'a>(
         normalize(&mut p.values);
     }
 
-    let mut out = TeeWriter::new(merged_out, region_out);
     run_nominal(
-        &mut out,
+        out,
         &phenotypes,
         &genotypes,
         args.window,
@@ -1737,7 +1706,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     } else {
         // Nominal pass can produce huge output; stream directly to disk to avoid unbounded memory.
-        let mut merged = BufWriter::new(File::create(&args.out)?);
+        File::create(&args.out)?;
         for region in &regions {
             if let Some(dir) = &args.out_dir {
                 let label = if region.end >= 1_000_000_000 {
@@ -1755,11 +1724,24 @@ fn main() -> Result<(), Box<dyn Error>> {
                     samples.len(),
                     &covariates,
                     &args,
-                    &mut merged,
-                    Some(&mut region_writer),
+                    &mut region_writer,
                 )
                 .map_err(|e| -> Box<dyn Error> { e.into() })?;
+                region_writer.flush()?;
+
+                let mut region_reader = File::open(std::path::Path::new(dir).join(format!("{}.txt", fname)))?;
+                let mut merged = BufWriter::new(
+                    OpenOptions::new()
+                        .append(true)
+                        .open(&args.out)?,
+                );
+                std::io::copy(&mut region_reader, &mut merged)?;
             } else {
+                let mut merged = BufWriter::new(
+                    OpenOptions::new()
+                        .append(true)
+                        .open(&args.out)?,
+                );
                 process_region_nominal_stream(
                     region,
                     &all_phenotypes,
@@ -1768,7 +1750,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                     &covariates,
                     &args,
                     &mut merged,
-                    None,
                 )
                 .map_err(|e| -> Box<dyn Error> { e.into() })?;
             }
