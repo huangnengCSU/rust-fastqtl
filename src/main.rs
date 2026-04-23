@@ -1396,6 +1396,7 @@ fn process_region(
     } else {
         format!("{}:{}-{}", region.chr, region.start, region.end)
     };
+    eprintln!("[{}] start", region_label);
 
     // Filter phenotypes for this region
     let mut phenotypes: Vec<Phenotype> = all_phenotypes
@@ -1520,6 +1521,7 @@ fn process_region_nominal_stream<'a>(
     } else {
         format!("{}:{}-{}", region.chr, region.start, region.end)
     };
+    eprintln!("[{}] start", region_label);
 
     let mut phenotypes: Vec<Phenotype> = all_phenotypes
         .iter()
@@ -1642,6 +1644,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|s| parse_region(s))
         .collect::<Result<Vec<_>, _>>()?;
 
+    eprintln!("loading phenotype BED: {}", args.bed);
     // Load ALL phenotypes once (filtered per region in parallel)
     let (samples, all_phenotypes, sample_index) = parse_bed(&args.bed)?;
     if all_phenotypes.is_empty() {
@@ -1649,6 +1652,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let covariates = if let Some(cov_path) = args.cov.as_ref() {
+        eprintln!("loading covariates: {}", cov_path);
         parse_covariates(cov_path, &sample_index, samples.len())?
     } else {
         Vec::new()
@@ -1671,6 +1675,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::fs::create_dir_all(dir)?;
     }
 
+    // Create/truncate merged output early so users can see the file immediately.
+    File::create(&args.out)?;
+    eprintln!("writing merged output to {}", args.out);
+
     if args.permute.is_some() {
         // Process regions in parallel; collect results in input order.
         // Permutation output is compact (one line per phenotype), so buffering per region is acceptable.
@@ -1691,7 +1699,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .collect();
 
         // Write outputs: merged file always; per-region files if --out-dir is set
-        let mut merged = BufWriter::new(File::create(&args.out)?);
+        let mut merged = BufWriter::new(OpenOptions::new().append(true).open(&args.out)?);
         for result in results {
             let (label, bytes) = result.map_err(|e| -> Box<dyn Error> { e.into() })?;
             merged.write_all(&bytes)?;
@@ -1704,9 +1712,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 f.write_all(&bytes)?;
             }
         }
+        merged.flush()?;
     } else {
         // Nominal pass can produce huge output; stream directly to disk to avoid unbounded memory.
-        File::create(&args.out)?;
         for region in &regions {
             if let Some(dir) = &args.out_dir {
                 let label = if region.end >= 1_000_000_000 {
