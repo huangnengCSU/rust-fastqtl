@@ -11,10 +11,18 @@ use flate2::read::MultiGzDecoder;
 use rayon::prelude::*;
 
 #[derive(Debug, Parser)]
-#[command(name = "rust-fastqtl", about = "Fast cis-QTL mapper (Rust port of FastQTL)")]
+#[command(
+    name = "rust-fastqtl",
+    about = "Fast cis-QTL mapper (Rust port of FastQTL)"
+)]
 struct Args {
     /// Input VCF/BCF file (may be gzip-compressed; mutually exclusive with --bedmethyl)
-    #[arg(short = 'v', long, required_unless_present = "bedmethyl", conflicts_with = "bedmethyl")]
+    #[arg(
+        short = 'v',
+        long,
+        required_unless_present = "bedmethyl",
+        conflicts_with = "bedmethyl"
+    )]
     vcf: Option<String>,
 
     /// Input methylation matrix BED file — rows=CpG sites, cols 4+ are per-sample integer dosage
@@ -56,6 +64,11 @@ struct Args {
     /// Useful to exclude CpG-overlapping SNPs in methylation QTL. Default 0 (no filtering).
     #[arg(long, default_value_t = 0)]
     min_window: i32,
+
+    /// Exclude variants whose position falls inside the phenotype BED interval.
+    /// For intron phenotypes, this keeps only cis variants outside the intron body.
+    #[arg(long, action = ArgAction::SetTrue)]
+    exclude_intron_snps: bool,
 
     /// P-value threshold for nominal-pass output
     #[arg(long, default_value_t = 1.0)]
@@ -113,7 +126,7 @@ struct Genotype {
 
 struct Residualizer {
     basis: Vec<Vec<f64>>, // orthonormal basis vectors (length = n_samples)
-    n_covariates: usize,  // effective covariates after dropping dependent columns (excludes intercept)
+    n_covariates: usize, // effective covariates after dropping dependent columns (excludes intercept)
 }
 
 struct XorShift64 {
@@ -207,12 +220,9 @@ impl XorShift64 {
     }
 }
 
-
 fn parse_region(s: &str) -> Result<Region, Box<dyn Error>> {
     if let Some((chr, rest)) = s.split_once(':') {
-        let (start_s, end_s) = rest
-            .split_once('-')
-            .ok_or("region must be chr:start-end")?;
+        let (start_s, end_s) = rest.split_once('-').ok_or("region must be chr:start-end")?;
         let start: i32 = start_s.parse()?;
         let end: i32 = end_s.parse()?;
         Ok(Region {
@@ -246,7 +256,11 @@ fn has_tabix_index(path: &str) -> bool {
     Path::new(&tbi).exists() || Path::new(&csi).exists()
 }
 
-fn open_vcf_reader(path: &str, region: &Region, window: i32) -> Result<Box<dyn BufRead>, Box<dyn Error>> {
+fn open_vcf_reader(
+    path: &str,
+    region: &Region,
+    window: i32,
+) -> Result<Box<dyn BufRead>, Box<dyn Error>> {
     let gstart = (region.start - window).max(1);
     let gend = (region.end + window).max(1);
     let region_arg = format!("{}:{}-{}", region.chr, gstart, gend);
@@ -275,7 +289,10 @@ fn parse_bed(
     if header.len() < 5 {
         return Err("BED header must have at least 5 columns".into());
     }
-    let samples = header[4..].iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+    let samples = header[4..]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect::<Vec<_>>();
 
     let mut sample_index = HashMap::new();
     for (i, s) in samples.iter().enumerate() {
@@ -284,7 +301,9 @@ fn parse_bed(
 
     let mut phenotypes = Vec::new();
     line.clear();
+    let mut line_no = 1usize;
     while reader.read_line(&mut line)? > 0 {
+        line_no += 1;
         if line.trim().is_empty() {
             line.clear();
             continue;
@@ -295,17 +314,41 @@ fn parse_bed(
             continue;
         }
         let chr = cols[0].to_string();
-        let start0: i32 = cols[1].parse()?;
+        let start0: i32 = cols[1].parse().map_err(|e| {
+            format!(
+                "invalid phenotype BED start at line {}, column 2: {:?} ({})",
+                line_no, cols[1], e
+            )
+        })?;
         let start1 = start0 + 1;
-        let end: i32 = cols[2].parse()?;
+        let end: i32 = cols[2].parse().map_err(|e| {
+            format!(
+                "invalid phenotype BED end at line {}, column 3: {:?} ({})",
+                line_no, cols[2], e
+            )
+        })?;
 
         let id = cols[3].to_string();
         let mut values = Vec::with_capacity(samples.len());
-        for v in &cols[4..] {
+        for (i, v) in cols[4..].iter().enumerate() {
             if *v == "NA" || *v == "." {
                 values.push(f64::NAN);
             } else {
-                values.push(v.parse::<f64>()?);
+                values.push(v.parse::<f64>().map_err(|e| {
+                    let sample = samples
+                        .get(i)
+                        .map(String::as_str)
+                        .unwrap_or("<extra column>");
+                    format!(
+                        "invalid phenotype BED value at line {}, column {} (phenotype {}, sample {}): {:?} ({})",
+                        line_no,
+                        i + 5,
+                        id,
+                        sample,
+                        v,
+                        e
+                    )
+                })?);
             }
         }
 
@@ -375,7 +418,12 @@ fn parse_covariates(
     Ok(covariates)
 }
 
-fn parse_gt_or_ds(sample_field: &str, _fmt_fields: &[&str], idx: usize, gt_mode: bool) -> Option<f64> {
+fn parse_gt_or_ds(
+    sample_field: &str,
+    _fmt_fields: &[&str],
+    idx: usize,
+    gt_mode: bool,
+) -> Option<f64> {
     let fields: Vec<&str> = sample_field.split(':').collect();
     if idx >= fields.len() {
         return None;
@@ -394,7 +442,6 @@ fn parse_gt_or_ds(sample_field: &str, _fmt_fields: &[&str], idx: usize, gt_mode:
         Some((a + b) as f64)
     }
 }
-
 
 fn maf_stats(values: &[Option<f64>]) -> Option<(f64, i32, usize)> {
     let mut c0 = 0_i32;
@@ -554,7 +601,10 @@ fn parse_genotype_bed(
     }
     let header: Vec<&str> = line.trim_end().split('\t').collect();
     if header.len() < 5 {
-        return Err("genotype BED header must have at least 5 columns (chr, start, end, id, sample...)".into());
+        return Err(
+            "genotype BED header must have at least 5 columns (chr, start, end, id, sample...)"
+                .into(),
+        );
     }
     // Build mapping: BED column index (relative to col 4) -> phenotype sample index
     let mut mapping: Vec<Option<usize>> = Vec::new();
@@ -809,7 +859,9 @@ fn betacf(a: f64, b: f64, x: f64) -> f64 {
     let qam = a - 1.0;
     let mut c = 1.0_f64;
     let mut d = 1.0 - qab * x / qap;
-    if d.abs() < FPMIN { d = FPMIN; }
+    if d.abs() < FPMIN {
+        d = FPMIN;
+    }
     d = 1.0 / d;
     let mut h = d;
     for m in 1..=MAXIT {
@@ -817,28 +869,42 @@ fn betacf(a: f64, b: f64, x: f64) -> f64 {
         let m2 = 2.0 * mf;
         let aa = mf * (b - mf) * x / ((qam + m2) * (a + m2));
         d = 1.0 + aa * d;
-        if d.abs() < FPMIN { d = FPMIN; }
+        if d.abs() < FPMIN {
+            d = FPMIN;
+        }
         c = 1.0 + aa / c;
-        if c.abs() < FPMIN { c = FPMIN; }
+        if c.abs() < FPMIN {
+            c = FPMIN;
+        }
         d = 1.0 / d;
         h *= d * c;
         let aa = -(a + mf) * (qab + mf) * x / ((a + m2) * (qap + m2));
         d = 1.0 + aa * d;
-        if d.abs() < FPMIN { d = FPMIN; }
+        if d.abs() < FPMIN {
+            d = FPMIN;
+        }
         c = 1.0 + aa / c;
-        if c.abs() < FPMIN { c = FPMIN; }
+        if c.abs() < FPMIN {
+            c = FPMIN;
+        }
         d = 1.0 / d;
         let del = d * c;
         h *= del;
-        if (del - 1.0).abs() < EPS { break; }
+        if (del - 1.0).abs() < EPS {
+            break;
+        }
     }
     h
 }
 
 fn pbeta(x: f64, a: f64, b: f64) -> f64 {
     // Regularized incomplete beta I_x(a, b), lower tail
-    if x <= 0.0 { return 0.0; }
-    if x >= 1.0 { return 1.0; }
+    if x <= 0.0 {
+        return 0.0;
+    }
+    if x >= 1.0 {
+        return 1.0;
+    }
     let lbeta_ab = lgamma(a) + lgamma(b) - lgamma(a + b);
     let log_bt = a * x.ln() + b * (-x).ln_1p() - lbeta_ab;
     let log_min = f64::MIN_POSITIVE.ln();
@@ -878,19 +944,37 @@ fn pvalue_from_corr_f(c: f64, df: f64) -> f64 {
 
 fn nelder_mead_2d<F: Fn(f64, f64) -> f64>(
     f: F,
-    x0: f64, y0: f64,
-    sx: f64, sy: f64,
-    tol: f64, max_iter: usize,
+    x0: f64,
+    y0: f64,
+    sx: f64,
+    sy: f64,
+    tol: f64,
+    max_iter: usize,
 ) -> (f64, f64) {
     let mut pts = [(x0, y0), (x0 + sx, y0), (x0, y0 + sy)];
-    let mut fv = [f(pts[0].0, pts[0].1), f(pts[1].0, pts[1].1), f(pts[2].0, pts[2].1)];
+    let mut fv = [
+        f(pts[0].0, pts[0].1),
+        f(pts[1].0, pts[1].1),
+        f(pts[2].0, pts[2].1),
+    ];
     for _ in 0..max_iter {
         // Sort: pts[0] = best (lowest f), pts[2] = worst
-        if fv[0] > fv[1] { pts.swap(0, 1); fv.swap(0, 1); }
-        if fv[0] > fv[2] { pts.swap(0, 2); fv.swap(0, 2); }
-        if fv[1] > fv[2] { pts.swap(1, 2); fv.swap(1, 2); }
+        if fv[0] > fv[1] {
+            pts.swap(0, 1);
+            fv.swap(0, 1);
+        }
+        if fv[0] > fv[2] {
+            pts.swap(0, 2);
+            fv.swap(0, 2);
+        }
+        if fv[1] > fv[2] {
+            pts.swap(1, 2);
+            fv.swap(1, 2);
+        }
         let size = ((pts[2].0 - pts[0].0).powi(2) + (pts[2].1 - pts[0].1).powi(2)).sqrt();
-        if size < tol { break; }
+        if size < tol {
+            break;
+        }
         let cx = (pts[0].0 + pts[1].0) / 2.0;
         let cy = (pts[0].1 + pts[1].1) / 2.0;
         // Reflect worst through centroid of best two
@@ -902,17 +986,24 @@ fn nelder_mead_2d<F: Fn(f64, f64) -> f64>(
             let ex = 3.0 * cx - 2.0 * pts[2].0;
             let ey = 3.0 * cy - 2.0 * pts[2].1;
             let fe = f(ex, ey);
-            if fe < fr { pts[2] = (ex, ey); fv[2] = fe; }
-            else        { pts[2] = (rx, ry); fv[2] = fr; }
+            if fe < fr {
+                pts[2] = (ex, ey);
+                fv[2] = fe;
+            } else {
+                pts[2] = (rx, ry);
+                fv[2] = fr;
+            }
         } else if fr < fv[1] {
-            pts[2] = (rx, ry); fv[2] = fr;
+            pts[2] = (rx, ry);
+            fv[2] = fr;
         } else {
             // Inside contraction
             let kx = (cx + pts[2].0) / 2.0;
             let ky = (cy + pts[2].1) / 2.0;
             let fk = f(kx, ky);
             if fk <= fv[2] {
-                pts[2] = (kx, ky); fv[2] = fk;
+                pts[2] = (kx, ky);
+                fv[2] = fk;
             } else {
                 // Shrink toward best
                 pts[1].0 = (pts[1].0 + pts[0].0) / 2.0;
@@ -924,18 +1015,16 @@ fn nelder_mead_2d<F: Fn(f64, f64) -> f64>(
             }
         }
     }
-    if fv[0] <= fv[1] && fv[0] <= fv[2] { pts[0] }
-    else if fv[1] <= fv[2] { pts[1] }
-    else { pts[2] }
+    if fv[0] <= fv[1] && fv[0] <= fv[2] {
+        pts[0]
+    } else if fv[1] <= fv[2] {
+        pts[1]
+    } else {
+        pts[2]
+    }
 }
 
-fn nelder_mead_1d<F: Fn(f64) -> f64>(
-    f: F,
-    x0: f64,
-    step: f64,
-    tol: f64,
-    max_iter: usize,
-) -> f64 {
+fn nelder_mead_1d<F: Fn(f64) -> f64>(f: F, x0: f64, step: f64, tol: f64, max_iter: usize) -> f64 {
     let mut pts = [x0, x0 + step.max(1e-6)];
     let mut fv = [f(pts[0]), f(pts[1])];
 
@@ -977,11 +1066,7 @@ fn nelder_mead_1d<F: Fn(f64) -> f64>(
         }
     }
 
-    if fv[0] <= fv[1] {
-        pts[0]
-    } else {
-        pts[1]
-    }
+    if fv[0] <= fv[1] { pts[0] } else { pts[1] }
 }
 
 // --- Beta distribution MLE via Nelder-Mead ---
@@ -996,7 +1081,7 @@ fn mle_beta(pvals: &[f64], shape1_init: f64, shape2_init: f64) -> (f64, f64) {
     let mut sl1mp = 0.0_f64;
     for &p in pvals {
         let pp = p.clamp(1e-15, 1.0 - 1e-15);
-        slp   += pp.ln();
+        slp += pp.ln();
         sl1mp += (1.0 - pp).ln();
     }
     let neg_ll = |a: f64, b: f64| -> f64 {
@@ -1008,21 +1093,37 @@ fn mle_beta(pvals: &[f64], shape1_init: f64, shape2_init: f64) -> (f64, f64) {
     };
     let s1 = shape1_init.clamp(S1_MIN, S1_MAX);
     let s2 = shape2_init.clamp(S2_MIN, S2_MAX);
-    let (a, b) = nelder_mead_2d(neg_ll, s1, s2, (s1 / 10.0).max(1e-4), (s2 / 10.0).max(1e-4), 0.01, 1000);
+    let (a, b) = nelder_mead_2d(
+        neg_ll,
+        s1,
+        s2,
+        (s1 / 10.0).max(1e-4),
+        (s2 / 10.0).max(1e-4),
+        0.01,
+        1000,
+    );
     (a.clamp(S1_MIN, S1_MAX), b.clamp(S2_MIN, S2_MAX))
 }
 
 // Moment-matching + optional MLE for Beta(shape1, shape2) from p-values
 fn fit_beta(pvals: &[f64], n_variants: usize) -> (f64, f64) {
-    if pvals.len() < 2 { return (1.0, 1.0); }
+    if pvals.len() < 2 {
+        return (1.0, 1.0);
+    }
     let n = pvals.len() as f64;
     let mean = pvals.iter().sum::<f64>() / n;
-    if mean <= 0.0 || mean >= 1.0 { return (1.0, 1.0); }
+    if mean <= 0.0 || mean >= 1.0 {
+        return (1.0, 1.0);
+    }
     let var = pvals.iter().map(|p| (p - mean).powi(2)).sum::<f64>() / (n - 1.0);
-    if var <= 0.0 { return (1.0, 1.0); }
+    if var <= 0.0 {
+        return (1.0, 1.0);
+    }
     let shape1 = mean * (mean * (1.0 - mean) / var - 1.0);
     let shape2 = shape1 * (1.0 / mean - 1.0);
-    if shape1 <= 0.0 || shape2 <= 0.0 { return (1.0, 1.0); }
+    if shape1 <= 0.0 || shape2 <= 0.0 {
+        return (1.0, 1.0);
+    }
     if n_variants > 10 {
         mle_beta(pvals, shape1, shape2)
     } else {
@@ -1040,11 +1141,22 @@ fn learn_df(corrs: &[f64], df_init: f64) -> f64 {
         if !df.is_finite() || df <= 0.0 {
             return 1e10;
         }
-        let mean = corrs.iter().map(|&c| pvalue_from_corr_f(c, df)).sum::<f64>() / n;
-        let var = corrs.iter()
-            .map(|&c| { let p = pvalue_from_corr_f(c, df); (p - mean).powi(2) })
-            .sum::<f64>() / (n - 1.0);
-        if var <= 0.0 { return 1e10; }
+        let mean = corrs
+            .iter()
+            .map(|&c| pvalue_from_corr_f(c, df))
+            .sum::<f64>()
+            / n;
+        let var = corrs
+            .iter()
+            .map(|&c| {
+                let p = pvalue_from_corr_f(c, df);
+                (p - mean).powi(2)
+            })
+            .sum::<f64>()
+            / (n - 1.0);
+        if var <= 0.0 {
+            return 1e10;
+        }
         let shape1 = mean * (mean * (1.0 - mean) / var - 1.0);
         (shape1 - 1.0).abs()
     };
@@ -1056,19 +1168,11 @@ fn learn_df(corrs: &[f64], df_init: f64) -> f64 {
     };
     let step = (x0 * 0.1).max(1e-6);
     let df = nelder_mead_1d(objective, x0, step, 0.01, 20);
-    if df.is_finite() && df > 0.0 {
-        df
-    } else {
-        x0
-    }
+    if df.is_finite() && df > 0.0 { df } else { x0 }
 }
 
 fn rank_normalize(v: &mut [f64]) {
-    let mut indexed = v
-        .iter()
-        .copied()
-        .enumerate()
-        .collect::<Vec<(usize, f64)>>();
+    let mut indexed = v.iter().copied().enumerate().collect::<Vec<(usize, f64)>>();
     indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
 
     let n = v.len();
@@ -1184,26 +1288,48 @@ fn dist_to_body(g_pos: i32, p_start: i32, p_end: i32) -> i32 {
     }
 }
 
+fn is_inside_phenotype_body(g_pos: i32, p: &Phenotype) -> bool {
+    g_pos >= p.start && g_pos <= p.end
+}
+
+fn cis_target(
+    g_pos: i32,
+    p: &Phenotype,
+    cis_window: i32,
+    min_window: i32,
+    exclude_intron_snps: bool,
+) -> Option<(i32, i32)> {
+    let dist = g_pos - p.start;
+    if dist.abs() > cis_window {
+        return None;
+    }
+    if exclude_intron_snps && is_inside_phenotype_body(g_pos, p) {
+        return None;
+    }
+    let dist2 = dist_to_body(g_pos, p.start, p.end);
+    if dist2.abs() < min_window {
+        return None;
+    }
+    Some((dist, dist2))
+}
+
 fn run_nominal(
     out: &mut dyn Write,
     phenotypes: &[Phenotype],
     genotypes: &[Genotype],
     cis_window: i32,
     min_window: i32,
+    exclude_intron_snps: bool,
     threshold: f64,
     n_cov: usize,
 ) -> Result<(), Box<dyn Error>> {
-
     for p in phenotypes {
         for g in genotypes {
-            let dist = g.pos - p.start;
-            if dist.abs() > cis_window {
+            let Some((dist, dist2)) =
+                cis_target(g.pos, p, cis_window, min_window, exclude_intron_snps)
+            else {
                 continue;
-            }
-            let dist2 = dist_to_body(g.pos, p.start, p.end);
-            if dist2.abs() < min_window {
-                continue;
-            }
+            };
             let c = corr(&g.values, &p.values);
             let df = (p.values.len() as i32 - 2 - n_cov as i32) as f64;
             if df <= 0.0 {
@@ -1237,6 +1363,7 @@ fn run_permutation(
     genotypes: &[Genotype],
     cis_window: i32,
     min_window: i32,
+    exclude_intron_snps: bool,
     n_cov: usize,
     residualizer: &Residualizer,
     permute: &[usize],
@@ -1249,21 +1376,17 @@ fn run_permutation(
             .iter()
             .enumerate()
             .filter_map(|(gi, g)| {
-                let d = g.pos - p.start;
-                if d.abs() <= cis_window {
-                    let d2 = dist_to_body(g.pos, p.start, p.end);
-                    if d2.abs() < min_window {
-                        return None;
-                    }
-                    Some((gi, d, d2))
-                } else {
-                    None
-                }
+                cis_target(g.pos, p, cis_window, min_window, exclude_intron_snps)
+                    .map(|(d, d2)| (gi, d, d2))
             })
             .collect::<Vec<(usize, i32, i32)>>();
 
         if target.is_empty() {
-            writeln!(out, "{}\t0\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA", p.id)?;
+            writeln!(
+                out,
+                "{}\t0\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA",
+                p.id
+            )?;
             continue;
         }
 
@@ -1331,7 +1454,8 @@ fn run_permutation(
         };
 
         // Compute permutation p-values with effective df, then fit Beta(shape1, shape2)
-        let perm_pvals: Vec<f64> = perm_corrs.iter()
+        let perm_pvals: Vec<f64> = perm_corrs
+            .iter()
             .map(|&c| pvalue_from_corr_f(c, eff_df.max(1.0)))
             .collect();
         let (beta_shape1, beta_shape2) = fit_beta(&perm_pvals, target.len());
@@ -1401,9 +1525,7 @@ fn process_region(
     // Filter phenotypes for this region
     let mut phenotypes: Vec<Phenotype> = all_phenotypes
         .iter()
-        .filter(|p| {
-            p.chr == region.chr && p.start >= region.start && p.start <= region.end
-        })
+        .filter(|p| p.chr == region.chr && p.start >= region.start && p.start <= region.end)
         .cloned()
         .collect();
 
@@ -1480,6 +1602,7 @@ fn process_region(
             &genotypes,
             args.window,
             args.min_window,
+            args.exclude_intron_snps,
             n_cov_effective,
             &residualizer,
             permute,
@@ -1493,6 +1616,7 @@ fn process_region(
             &genotypes,
             args.window,
             args.min_window,
+            args.exclude_intron_snps,
             args.threshold,
             n_cov_effective,
         )
@@ -1500,8 +1624,10 @@ fn process_region(
     }
 
     eprintln!(
-        "[{}] done: phenotypes={}, genotypes={}", region_label,
-        phenotypes.len(), genotypes.len()
+        "[{}] done: phenotypes={}, genotypes={}",
+        region_label,
+        phenotypes.len(),
+        genotypes.len()
     );
 
     Ok((region_label, buf))
@@ -1594,6 +1720,7 @@ fn process_region_nominal_stream<'a>(
         &genotypes,
         args.window,
         args.min_window,
+        args.exclude_intron_snps,
         args.threshold,
         n_cov_effective,
     )
@@ -1737,20 +1864,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .map_err(|e| -> Box<dyn Error> { e.into() })?;
                 region_writer.flush()?;
 
-                let mut region_reader = File::open(std::path::Path::new(dir).join(format!("{}.txt", fname)))?;
-                let mut merged = BufWriter::new(
-                    OpenOptions::new()
-                        .append(true)
-                        .open(&args.out)?,
-                );
+                let mut region_reader =
+                    File::open(std::path::Path::new(dir).join(format!("{}.txt", fname)))?;
+                let mut merged = BufWriter::new(OpenOptions::new().append(true).open(&args.out)?);
                 std::io::copy(&mut region_reader, &mut merged)?;
                 merged.flush()?;
             } else {
-                let mut merged = BufWriter::new(
-                    OpenOptions::new()
-                        .append(true)
-                        .open(&args.out)?,
-                );
+                let mut merged = BufWriter::new(OpenOptions::new().append(true).open(&args.out)?);
                 process_region_nominal_stream(
                     region,
                     &all_phenotypes,

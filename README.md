@@ -55,6 +55,8 @@ Options:
   -r, --region <REGION>...                   Region(s) to analyse (chr:start-end or chr); repeat for multiple
   -t, --threads <THREADS>                    Parallel threads [default: all CPUs]
   -w, --window <WINDOW>                      Cis-window size in bp [default: 1000000]
+      --min-window <MIN_WINDOW>              Minimum distance from variant to phenotype body [default: 0]
+      --exclude-intron-snps                  Exclude variants whose position falls inside the phenotype BED interval
       --threshold <THRESHOLD>                P-value threshold for nominal-pass output [default: 1]
       --maf-threshold <MAF_THRESHOLD>        Minor allele frequency filter [default: 0]
       --ma-sample-threshold <N>              Minimum samples carrying the minor allele [default: 0]
@@ -148,6 +150,8 @@ phenotype_id  variant_id  distance  distance_to_body  ma_samples  ma_count  maf 
 | `distance` | `variant_pos − phenotype_start` (signed; TSS-anchored, matches original FastQTL) |
 | `distance_to_body` | Signed distance anchored at the nearer of `phenotype_start` or `phenotype_end`. The closer boundary is chosen as anchor; the value is `variant_pos − anchor` (negative = upstream of that boundary, positive = downstream). More informative than `distance` for long phenotypes such as introns, where the variant may be far from the TSS but close to the splice site. |
 
+Use `--exclude-intron-snps` to scan only variants outside each phenotype BED interval. For intron phenotypes, SNPs with positions inside the intron body are skipped in both nominal and permutation modes; upstream and downstream cis SNPs remain eligible.
+
 ### Permutation mode
 
 With VCF genotypes:
@@ -234,10 +238,10 @@ The following differences from https://github.com/francois-a/fastqtl are known a
 |---|---|---|
 | Nominal p-value | Exact F(1, df) CDF via GSL `gsl_cdf_fdist_Q()` | Exact F(1, df) CDF via custom regularized incomplete beta (`pbeta`) — numerically equivalent |
 | Internal numeric precision | `float` (32-bit) for genotype/phenotype storage; `double` for statistics | `f64` (64-bit) throughout — small numerical differences possible |
-| Permutation shuffle | Shuffles raw (pre-residualization) phenotype, then re-residualizes each permutation | Shuffles already-residualized phenotype; no re-residualization per permutation |
-| Covariate residualization | Eigen `ColPivHouseholderQR` (QR decomposition); detects and drops linearly dependent covariates | Normal equations (X'X)⁻¹X'y via Gauss-Jordan inversion — less numerically stable for ill-conditioned matrices; no rank-deficiency handling |
+| Permutation shuffle | Shuffles raw (pre-residualization) phenotype, then re-residualizes each permutation | Shuffles raw (pre-residualization) phenotype, then re-residualizes each permutation |
+| Covariate residualization | Eigen `ColPivHouseholderQR` (QR decomposition); detects and drops linearly dependent covariates | QR-style orthogonal projection via modified Gram-Schmidt over intercept+covariates; dependent columns are dropped automatically |
 | Categorical covariates | Automatically converts factor covariates to binary dummy variables; drops constant covariates | Only numeric covariates supported |
-| `learnDF` optimizer | 1-D Nelder-Mead via GSL (`nmsimplex2`), ≤20 iterations, tol=0.01 | Golden-section search over [1, max(3×df, 100)], 50 iterations, tol=0.01 |
+| `learnDF` optimizer | 1-D Nelder-Mead via GSL (`nmsimplex2`), ≤20 iterations, tol=0.01 | 1-D Nelder-Mead (FastQTL-like settings: ≤20 iterations, tol=0.01) |
 | PRNG | `std::random_shuffle` backed by `rand()`; supports `--seed` (default: `time(NULL)`) | XorShift64; supports `--seed` (default: 12345) — algorithms and seed spaces are incompatible |
 | `ref_factor` output | Reported in permutation output (REF/ALT orientation) | Not reported |
 | Conditional mapping | Implemented (`--mapping`) | Not implemented |
