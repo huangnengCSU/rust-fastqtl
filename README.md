@@ -63,6 +63,7 @@ Options:
   -p, --permute <PERMUTE>...                 Permutation counts (1–3 integers, see below)
       --seed <SEED>                          Random seed [default: 12345]
   -n, --normal                               Apply rank-normal transformation to phenotypes
+      --variant-pos                          Use variant position (chr_pos) as variant ID instead of the VCF ID / BED ID column
   -h, --help                                 Print help
 ```
 
@@ -147,6 +148,7 @@ phenotype_id  variant_id  distance  distance_to_body  ma_samples  ma_count  maf 
 
 | Column | Description |
 |---|---|
+| `variant_id` | VCF ID or BED ID column by default; with `--variant-pos`, reported as `chr_pos` using the 1-based variant position. VCF records with missing ID (`.`) also fall back to `chr_pos`. |
 | `distance` | `variant_pos − phenotype_start` (signed; TSS-anchored, matches original FastQTL) |
 | `distance_to_body` | Signed distance anchored at the nearer of `phenotype_start` or `phenotype_end`. The closer boundary is chosen as anchor; the value is `variant_pos − anchor` (negative = upstream of that boundary, positive = downstream). More informative than `distance` for long phenotypes such as introns, where the variant may be far from the TSS but close to the splice site. |
 
