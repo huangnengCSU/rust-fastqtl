@@ -94,6 +94,10 @@ struct Args {
     /// Apply rank-normal transformation to phenotypes
     #[arg(short, long, action = ArgAction::SetTrue)]
     normal: bool,
+
+    /// Use variant position (chr_pos) as variant ID instead of the VCF ID / BED ID column
+    #[arg(long, action = ArgAction::SetTrue)]
+    variant_pos: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -490,6 +494,7 @@ fn parse_vcf(
     n_samples: usize,
     maf_threshold: f64,
     ma_sample_threshold: usize,
+    use_pos: bool,
 ) -> Result<Vec<Genotype>, Box<dyn Error>> {
     let mut reader = open_vcf_reader(path, region, window)?;
     let mut line = String::new();
@@ -561,7 +566,7 @@ fn parse_vcf(
                     .map(|v| v.unwrap_or(f64::NAN))
                     .collect::<Vec<f64>>();
                 impute_nan(&mut values);
-                let id = if cols[2] == "." {
+                let id = if use_pos || cols[2] == "." {
                     format!("{}_{}", chr, pos)
                 } else {
                     cols[2].to_string()
@@ -592,6 +597,7 @@ fn parse_genotype_bed(
     n_samples: usize,
     maf_threshold: f64,
     ma_sample_threshold: usize,
+    use_pos: bool,
 ) -> Result<Vec<Genotype>, Box<dyn Error>> {
     let mut reader = open_bufread(path)?;
     let mut line = String::new();
@@ -636,7 +642,11 @@ fn parse_genotype_bed(
             continue;
         }
 
-        let id = cols[3].to_string();
+        let id = if use_pos {
+            format!("{}_{}", chr, pos)
+        } else {
+            cols[3].to_string()
+        };
 
         let mut vals_opt = vec![None::<f64>; n_samples];
         for (i, v) in cols[4..].iter().enumerate() {
@@ -1550,6 +1560,7 @@ fn process_region(
             n_samples,
             args.maf_threshold,
             args.ma_sample_threshold,
+            args.variant_pos,
         )
         .map_err(|e| format!("[{}] VCF parse error: {}", region_label, e))?
     } else {
@@ -1562,6 +1573,7 @@ fn process_region(
             n_samples,
             args.maf_threshold,
             args.ma_sample_threshold,
+            args.variant_pos,
         )
         .map_err(|e| format!("[{}] bedmethyl parse error: {}", region_label, e))?
     };
@@ -1676,6 +1688,7 @@ fn process_region_nominal_stream<'a>(
             n_samples,
             args.maf_threshold,
             args.ma_sample_threshold,
+            args.variant_pos,
         )
         .map_err(|e| format!("[{}] VCF parse error: {}", region_label, e))?
     } else {
@@ -1688,6 +1701,7 @@ fn process_region_nominal_stream<'a>(
             n_samples,
             args.maf_threshold,
             args.ma_sample_threshold,
+            args.variant_pos,
         )
         .map_err(|e| format!("[{}] bedmethyl parse error: {}", region_label, e))?
     };
