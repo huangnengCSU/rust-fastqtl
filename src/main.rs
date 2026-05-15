@@ -187,7 +187,8 @@ struct Phenotype {
 struct Genotype {
     id: String,
     pos: i32,
-    values: Vec<f64>,
+    values: Vec<f64>,       // after mean-imputation of missing
+    raw_values: Vec<Option<f64>>, // pre-imputation (None = missing)
     sd: f64,
     maf: f64,
     ma_count: i32,
@@ -627,6 +628,7 @@ fn parse_vcf(
 
         if let Some((maf, ma_count, ma_samples)) = maf_stats(&vals_opt) {
             if maf >= maf_threshold && ma_samples >= ma_sample_threshold {
+                let raw_values = vals_opt.clone();
                 let mut values = vals_opt
                     .iter()
                     .map(|v| v.unwrap_or(f64::NAN))
@@ -641,6 +643,7 @@ fn parse_vcf(
                     id,
                     pos,
                     values,
+                    raw_values,
                     sd: 0.0,
                     maf,
                     ma_count,
@@ -727,6 +730,7 @@ fn parse_genotype_bed(
 
         if let Some((maf, ma_count, ma_samples)) = stats {
             if maf >= maf_threshold && ma_samples >= ma_sample_threshold {
+                let raw_values = vals_opt.clone();
                 let mut values = vals_opt
                     .iter()
                     .map(|v| v.unwrap_or(f64::NAN))
@@ -736,6 +740,7 @@ fn parse_genotype_bed(
                     id,
                     pos,
                     values,
+                    raw_values,
                     sd: 0.0,
                     maf,
                     ma_count,
@@ -1950,11 +1955,19 @@ fn run_test(args: TestArgs) -> Result<(), Box<dyn Error>> {
     println!("=== Variant ===");
     println!("ID:  {}", genotype.id);
     println!("Chr: {}  Pos: {}", phenotype.chr, genotype.pos);
+    // Estimate imputed-missing count: after impute_nan(), missing samples all share
+    // exactly the non-missing mean, which is generally non-integer for GT dosage.
+    // Values strictly equal to the overall mean (within fp tolerance) are imputed.
+    let geno_mean = genotype.values.iter().sum::<f64>() / n as f64;
+    let n_imputed = genotype.values.iter()
+        .filter(|&&v| (v - geno_mean).abs() < 1e-9)
+        .count();
     println!(
-        "MAF: {:.4}  MA_count: {}  MA_samples: {}",
-        genotype.maf, genotype.ma_count, genotype.ma_samples
+        "MAF: {:.4}  MA_count: {}  MA_samples: {}  missing/imputed: {}/{} ({:.1}%)",
+        genotype.maf, genotype.ma_count, genotype.ma_samples,
+        n_imputed, n, n_imputed as f64 / n as f64 * 100.0
     );
-    print_preview("Raw genotype values", &genotype.values);
+    print_preview("Raw genotype values (missing → mean-imputed)", &genotype.values);
 
     let mut geno_resid = genotype.values.clone();
     residualizer.residualize(&mut geno_resid);
@@ -2066,14 +2079,19 @@ fn run_test(args: TestArgs) -> Result<(), Box<dyn Error>> {
         )?;
 
         // Per-sample data.
-        writeln!(w, "sample\tpheno_raw\tpheno_resid\tgeno_raw\tgeno_resid")?;
+        writeln!(w, "sample\tpheno_raw\tpheno_resid\tgeno_gt\tgeno_raw\tgeno_resid")?;
         for (i, sample) in samples.iter().enumerate() {
+            let gt = match genotype.raw_values[i] {
+                Some(v) => format!("{}", v),
+                None    => "NA".to_string(),
+            };
             writeln!(
                 w,
-                "{}\t{:.6}\t{:.6}\t{:.6}\t{:.6}",
+                "{}\t{:.6}\t{:.6}\t{}\t{:.6}\t{:.6}",
                 sample,
                 phen_values[i],
                 phen_resid_saved[i],
+                gt,
                 genotype.values[i],
                 geno_resid_saved[i],
             )?;
