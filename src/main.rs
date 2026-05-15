@@ -159,6 +159,10 @@ struct TestArgs {
     /// Use variant position (chr_pos) as variant ID instead of VCF ID column
     #[arg(long, action = ArgAction::SetTrue)]
     variant_pos: bool,
+
+    /// Write per-sample TSV to this path (stats written as leading # comment lines)
+    #[arg(long)]
+    out: Option<String>,
 }
 
 
@@ -1959,6 +1963,9 @@ fn run_test(args: TestArgs) -> Result<(), Box<dyn Error>> {
     print_preview("After residualization", &geno_resid);
 
     // ── Normalize and compute association statistics ───────────────────────────
+    // Save residualized-but-not-normalized values for TSV output before normalize() mutates them.
+    let phen_resid_saved = phen_resid.clone();
+    let geno_resid_saved = geno_resid.clone();
     normalize(&mut phen_resid);
     normalize(&mut geno_resid);
     let c = corr(&geno_resid, &phen_resid);
@@ -2032,6 +2039,48 @@ fn run_test(args: TestArgs) -> Result<(), Box<dyn Error>> {
         "  => Overall: {}",
         if cis_result.is_some() { "PASS" } else { "FAIL" }
     );
+
+    // ── Optional TSV output ───────────────────────────────────────────────────
+    if let Some(out_path) = args.out.as_ref() {
+        let mut w = BufWriter::new(File::create(out_path)?);
+
+        // Metadata as # comment lines so R/pandas can skip them automatically.
+        writeln!(
+            w,
+            "# phenotype_id={}\tchr={}\tstart={}\tend={}",
+            phenotype.id, phenotype.chr, phenotype.start, phenotype.end
+        )?;
+        writeln!(
+            w,
+            "# variant_id={}\tpos={}\tmaf={:.6}\tma_count={}\tma_samples={}",
+            genotype.id, genotype.pos, genotype.maf, genotype.ma_count, genotype.ma_samples
+        )?;
+        writeln!(
+            w,
+            "# n={}\tn_cov={}\tdf={:.0}\tr={:.6}\tbeta={:.6}\tse={:.6}\tt2={}\tpval={}\tdist={}\tdist2={}\tcis_filter={}",
+            n, n_cov, df, c, b, bse,
+            if df > 0.0 { format!("{:.6}", t2) } else { "NA".to_string() },
+            if df > 0.0 { format!("{:.6e}", pval) } else { "NA".to_string() },
+            dist, dist2,
+            if cis_result.is_some() { "PASS" } else { "FAIL" }
+        )?;
+
+        // Per-sample data.
+        writeln!(w, "sample\tpheno_raw\tpheno_resid\tgeno_raw\tgeno_resid")?;
+        for (i, sample) in samples.iter().enumerate() {
+            writeln!(
+                w,
+                "{}\t{:.6}\t{:.6}\t{:.6}\t{:.6}",
+                sample,
+                phen_values[i],
+                phen_resid_saved[i],
+                genotype.values[i],
+                geno_resid_saved[i],
+            )?;
+        }
+        w.flush()?;
+        eprintln!("per-sample TSV written to {}", out_path);
+    }
 
     Ok(())
 }
