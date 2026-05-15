@@ -15,7 +15,7 @@ use rayon::prelude::*;
     name = "rust-fastqtl",
     about = "Fast cis-QTL mapper (Rust port of FastQTL)"
 )]
-struct Args {
+struct RunArgs {
     /// Input VCF/BCF file (may be gzip-compressed; mutually exclusive with --bedmethyl)
     #[arg(
         short = 'v',
@@ -99,6 +99,68 @@ struct Args {
     #[arg(long, action = ArgAction::SetTrue)]
     variant_pos: bool,
 }
+
+#[derive(Debug, Parser)]
+#[command(about = "Test a specific phenotype–variant pair (verbose diagnostic output to stdout)")]
+struct TestArgs {
+    /// Input VCF/BCF file (mutually exclusive with --bedmethyl)
+    #[arg(
+        short = 'v',
+        long,
+        required_unless_present = "bedmethyl",
+        conflicts_with = "bedmethyl"
+    )]
+    vcf: Option<String>,
+
+    /// Input methylation matrix BED file (mutually exclusive with --vcf)
+    #[arg(short = 'm', long, conflicts_with = "vcf")]
+    bedmethyl: Option<String>,
+
+    /// Input BED phenotype file (may be gzip-compressed)
+    #[arg(short, long)]
+    bed: String,
+
+    /// Covariate file (optional)
+    #[arg(short, long)]
+    cov: Option<String>,
+
+    /// Phenotype ID to test
+    #[arg(long)]
+    phenotype_id: String,
+
+    /// Variant ID to test
+    #[arg(long)]
+    variant_id: String,
+
+    /// Cis-window size in bp (used for filter reporting only; variant is searched genome-wide)
+    #[arg(short, long, default_value_t = 1_000_000)]
+    window: i32,
+
+    /// Minimum distance filter (bp) from variant to phenotype body
+    #[arg(long, default_value_t = 0)]
+    min_window: i32,
+
+    /// Exclude variants whose position falls inside the phenotype BED interval
+    #[arg(long, action = ArgAction::SetTrue)]
+    exclude_intron_snps: bool,
+
+    /// Minor allele frequency filter
+    #[arg(long, default_value_t = 0.0)]
+    maf_threshold: f64,
+
+    /// Minimum number of samples carrying the minor allele
+    #[arg(long, default_value_t = 0)]
+    ma_sample_threshold: usize,
+
+    /// Apply rank-normal transformation to phenotypes
+    #[arg(short, long, action = ArgAction::SetTrue)]
+    normal: bool,
+
+    /// Use variant position (chr_pos) as variant ID instead of VCF ID column
+    #[arg(long, action = ArgAction::SetTrue)]
+    variant_pos: bool,
+}
+
 
 #[derive(Clone, Debug)]
 struct Region {
@@ -1523,7 +1585,7 @@ fn process_region(
     sample_index: &HashMap<String, usize>,
     n_samples: usize,
     covariates: &[Vec<f64>],
-    args: &Args,
+    args: &RunArgs,
 ) -> Result<(String, Vec<u8>), String> {
     let region_label = if region.end >= 1_000_000_000 {
         region.chr.clone()
@@ -1651,7 +1713,7 @@ fn process_region_nominal_stream<'a>(
     sample_index: &HashMap<String, usize>,
     n_samples: usize,
     covariates: &[Vec<f64>],
-    args: &Args,
+    args: &RunArgs,
     out: &'a mut dyn Write,
 ) -> Result<String, String> {
     let region_label = if region.end >= 1_000_000_000 {
@@ -1750,8 +1812,218 @@ fn process_region_nominal_stream<'a>(
     Ok(region_label)
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let args = Args::parse();
+fn print_preview(label: &str, v: &[f64]) {
+    let count = v.len().min(10);
+    let preview: Vec<String> = v.iter().take(count).map(|x| format!("{:.4}", x)).collect();
+    let ellipsis = if v.len() > 10 { " ..." } else { "" };
+    let mean = if v.is_empty() {
+        0.0
+    } else {
+        v.iter().sum::<f64>() / v.len() as f64
+    };
+    let sd = stddev(v);
+    println!(
+        "  {} (n={}{}, first {}): {}",
+        label,
+        v.len(),
+        ellipsis,
+        count,
+        preview.join("  ")
+    );
+    println!("    mean={:.4}  sd={:.4}", mean, sd);
+}
+
+fn run_test(args: TestArgs) -> Result<(), Box<dyn Error>> {
+    eprintln!("loading phenotype BED: {}", args.bed);
+    let (samples, all_phenotypes, sample_index) = parse_bed(&args.bed)?;
+
+    let phenotype = all_phenotypes
+        .iter()
+        .find(|p| p.id == args.phenotype_id)
+        .ok_or_else(|| format!("phenotype '{}' not found in BED file", args.phenotype_id))?
+        .clone();
+
+    let covariates = if let Some(cov_path) = args.cov.as_ref() {
+        eprintln!("loading covariates: {}", cov_path);
+        parse_covariates(cov_path, &sample_index, samples.len())?
+    } else {
+        Vec::new()
+    };
+
+    // Scan the entire chromosome so the variant is found regardless of the cis-window.
+    let chr_region = Region {
+        chr: phenotype.chr.clone(),
+        start: 1,
+        end: i32::MAX - 1,
+    };
+
+    eprintln!(
+        "scanning {} for variant '{}'...",
+        phenotype.chr, args.variant_id
+    );
+
+    let all_genotypes = if let Some(vcf_path) = args.vcf.as_ref() {
+        parse_vcf(
+            vcf_path,
+            &chr_region,
+            0,
+            &sample_index,
+            samples.len(),
+            args.maf_threshold,
+            args.ma_sample_threshold,
+            args.variant_pos,
+        )?
+    } else {
+        let gbed_path = args.bedmethyl.as_ref().unwrap();
+        parse_genotype_bed(
+            gbed_path,
+            &chr_region,
+            0,
+            &sample_index,
+            samples.len(),
+            args.maf_threshold,
+            args.ma_sample_threshold,
+            args.variant_pos,
+        )?
+    };
+
+    let genotype = all_genotypes
+        .iter()
+        .find(|g| g.id == args.variant_id)
+        .ok_or_else(|| {
+            format!(
+                "variant '{}' not found on {} (or filtered by MAF/MA thresholds; \
+                 try --maf-threshold 0 --ma-sample-threshold 0)",
+                args.variant_id, phenotype.chr
+            )
+        })?
+        .clone();
+
+    // ── Phenotype processing ──────────────────────────────────────────────────
+    let n = samples.len();
+    let mut phen_values = phenotype.values.clone();
+    impute_nan(&mut phen_values);
+
+    println!("=== Phenotype ===");
+    println!("ID:  {}", phenotype.id);
+    println!(
+        "Chr: {}  Start: {}  End: {}",
+        phenotype.chr, phenotype.start, phenotype.end
+    );
+    print_preview("Raw values", &phen_values);
+
+    if args.normal {
+        rank_normalize(&mut phen_values);
+        println!();
+        print_preview("After rank-normal transform", &phen_values);
+    }
+
+    // ── Covariate residualization ─────────────────────────────────────────────
+    let residualizer = Residualizer::new(&covariates, n);
+    let n_cov = residualizer.n_covariates();
+
+    let mut phen_resid = phen_values.clone();
+    residualizer.residualize(&mut phen_resid);
+    let phen_sd = stddev(&phen_resid);
+    println!();
+    print_preview("After residualization", &phen_resid);
+
+    // ── Variant processing ────────────────────────────────────────────────────
+    println!();
+    println!("=== Variant ===");
+    println!("ID:  {}", genotype.id);
+    println!("Chr: {}  Pos: {}", phenotype.chr, genotype.pos);
+    println!(
+        "MAF: {:.4}  MA_count: {}  MA_samples: {}",
+        genotype.maf, genotype.ma_count, genotype.ma_samples
+    );
+    print_preview("Raw genotype values", &genotype.values);
+
+    let mut geno_resid = genotype.values.clone();
+    residualizer.residualize(&mut geno_resid);
+    let geno_sd = stddev(&geno_resid);
+    println!();
+    print_preview("After residualization", &geno_resid);
+
+    // ── Normalize and compute association statistics ───────────────────────────
+    normalize(&mut phen_resid);
+    normalize(&mut geno_resid);
+    let c = corr(&geno_resid, &phen_resid);
+
+    let df = (n as i32 - 2 - n_cov as i32) as f64;
+    let t2 = if df > 0.0 { tstat2(c, df) } else { f64::NAN };
+    let pval = if df > 0.0 {
+        pvalue_from_tstat2(t2, df)
+    } else {
+        f64::NAN
+    };
+    let b = slope(c, phen_sd, geno_sd);
+    let bse = if df > 0.0 && t2.is_finite() && t2 > 0.0 {
+        b.abs() / t2.sqrt()
+    } else {
+        f64::NAN
+    };
+
+    let dist = genotype.pos - phenotype.start;
+    let dist2 = dist_to_body(genotype.pos, phenotype.start, phenotype.end);
+    let cis_result = cis_target(
+        genotype.pos,
+        &phenotype,
+        args.window,
+        args.min_window,
+        args.exclude_intron_snps,
+    );
+
+    println!();
+    println!("=== Association Statistics ===");
+    println!("n_samples:    {}", n);
+    println!("n_covariates: {} (effective)", n_cov);
+    println!("df:           {:.0}", df);
+    println!("Pearson r:    {:.6}", c);
+    println!("Beta (slope): {:.6}", b);
+    println!("SE(beta):     {:.6}", bse);
+    if df > 0.0 {
+        println!("T2:           {:.6}", t2);
+        println!("P-value:      {:.6e}", pval);
+    } else {
+        println!("T2:           NA  (df = {:.0} <= 0)", df);
+        println!("P-value:      NA");
+    }
+    println!("Distance (from TSS):  {} bp", dist);
+    println!("Distance (from body): {} bp", dist2);
+    println!();
+    println!(
+        "Cis filters (window={} bp  min_window={} bp  exclude_intron_snps={}):",
+        args.window, args.min_window, args.exclude_intron_snps
+    );
+    println!(
+        "  |dist from TSS| <= window:       {}  ({} <= {})",
+        if dist.abs() <= args.window { "PASS" } else { "FAIL" },
+        dist.abs(),
+        args.window
+    );
+    println!(
+        "  |dist from body| >= min_window:  {}  ({} >= {})",
+        if dist2.abs() >= args.min_window { "PASS" } else { "FAIL" },
+        dist2.abs(),
+        args.min_window
+    );
+    if args.exclude_intron_snps {
+        let inside = is_inside_phenotype_body(genotype.pos, &phenotype);
+        println!(
+            "  Not inside intron body:          {}",
+            if inside { "FAIL (variant is inside body)" } else { "PASS" }
+        );
+    }
+    println!(
+        "  => Overall: {}",
+        if cis_result.is_some() { "PASS" } else { "FAIL" }
+    );
+
+    Ok(())
+}
+
+fn run_main(args: RunArgs) -> Result<(), Box<dyn Error>> {
     if args.window <= 0 {
         return Err("--window must be positive".into());
     }
@@ -1901,4 +2173,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let raw: Vec<String> = std::env::args().collect();
+    if raw.get(1).map(String::as_str) == Some("test") {
+        // Strip "test" from argv; use "rust-fastqtl test" as the program name for clean --help.
+        let prog = format!("{} test", raw[0]);
+        let argv: Vec<&str> = std::iter::once(prog.as_str())
+            .chain(raw[2..].iter().map(String::as_str))
+            .collect();
+        let args = TestArgs::parse_from(argv);
+        run_test(args)
+    } else {
+        let args = RunArgs::parse();
+        run_main(args)
+    }
 }
