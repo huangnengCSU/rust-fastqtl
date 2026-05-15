@@ -16,7 +16,7 @@ A Rust reimplementation of the core FastQTL cis-QTL mapping logic.
 - Use `tabix -h` region retrieval automatically for `.vcf.gz` with `.tbi/.csi` index
 - **Multi-region parallel processing**: pass multiple `-r` regions; all regions run concurrently with `rayon` and results are merged in order into a single output file; thread count controlled by `--threads`
 - Parse methylation matrix BED (`--bedmethyl`) — rows = CpG sites, columns 4+ = per-sample integer dosage (0/1/2); methylation used as **predictor** (genotype-like), phenotype BED as **outcome** (e.g. splicing → methyl-sQTL; expression → methyl-eQTL)
-- MAF and minor-allele-sample filtering (`--maf-threshold`, `--ma-sample-threshold`)
+- Genotype quality filtering by MAF, minor-allele samples, and missingness (`--maf-threshold`, `--ma-sample-threshold`, `--max-missing`)
 - Missing genotype/phenotype imputation by per-feature mean
 - Optional phenotype rank-normal transformation (`--normal`)
 - Optional covariate correction by OLS residualization (`--cov`)
@@ -60,6 +60,7 @@ Options:
       --threshold <THRESHOLD>                P-value threshold for nominal-pass output [default: 1]
       --maf-threshold <MAF_THRESHOLD>        Minor allele frequency filter [default: 0]
       --ma-sample-threshold <N>              Minimum samples carrying the minor allele [default: 0]
+      --max-missing <MAX_MISSING>            Maximum fraction of samples with missing genotype [0, 1]; variants above this are excluded [default: 1]
   -p, --permute <PERMUTE>...                 Permutation counts (1–3 integers, see below)
       --seed <SEED>                          Random seed [default: 12345]
   -n, --normal                               Apply rank-normal transformation to phenotypes
@@ -96,6 +97,7 @@ rust_fastqtl \
   --threshold 1.0 \
   --maf-threshold 0.01 \
   --ma-sample-threshold 1 \
+  --max-missing 0.1 \
   -o nominal.txt
 ```
 
@@ -109,6 +111,7 @@ rust_fastqtl \
   -t 5 \
   --maf-threshold 0.01 \
   --ma-sample-threshold 5 \
+  --max-missing 0.1 \
   -o nominal_all.txt
 ```
 
@@ -122,6 +125,7 @@ rust_fastqtl \
   -t 5 \
   --maf-threshold 0.01 \
   --ma-sample-threshold 5 \
+  --max-missing 0.1 \
   -o nominal_all.txt \
   --out-dir results/
 # produces: nominal_all.txt  +  results/chr1.txt  results/chr2.txt  ...
@@ -153,6 +157,8 @@ phenotype_id  variant_id  distance  distance_to_body  ma_samples  ma_count  maf 
 | `distance_to_body` | Signed distance anchored at the nearer of `phenotype_start` or `phenotype_end`. The closer boundary is chosen as anchor; the value is `variant_pos − anchor` (negative = upstream of that boundary, positive = downstream). More informative than `distance` for long phenotypes such as introns, where the variant may be far from the TSS but close to the splice site. |
 
 Use `--exclude-intron-snps` to scan only variants outside each phenotype BED interval. For intron phenotypes, SNPs with positions inside the intron body are skipped in both nominal and permutation modes; upstream and downstream cis SNPs remain eligible.
+
+Use `--max-missing` to exclude variants with too many missing genotype/dosage values before mean imputation. The value is a fraction in `[0, 1]`; for example, `--max-missing 0.1` keeps variants with at most 10% missing samples. The default `1.0` preserves the historical behavior.
 
 ### Permutation mode
 
@@ -219,7 +225,7 @@ Each value is an integer genotype-like call:
 | `1`   | Hemi-methylation |
 | `2`   | High methylation |
 
-MAF and `ma_count` / `ma_samples` are computed identically to SNV dosage: `maf = min(ref_alleles, alt_alleles) / (2 × n_samples)`, where `ref_alleles = 2×n0 + n1` and `alt_alleles = n1 + 2×n2`. `--maf-threshold` and `--ma-sample-threshold` work the same as for VCF variants.
+MAF and `ma_count` / `ma_samples` are computed identically to SNV dosage: `maf = min(ref_alleles, alt_alleles) / (2 × n_samples)`, where `ref_alleles = 2×n0 + n1` and `alt_alleles = n1 + 2×n2`. `--maf-threshold`, `--ma-sample-threshold`, and `--max-missing` work the same as for VCF variants.
 
 ### Notes
 
