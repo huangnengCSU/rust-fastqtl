@@ -1923,6 +1923,8 @@ fn run_test(args: TestArgs) -> Result<(), Box<dyn Error>> {
 
     // ── Phenotype processing ──────────────────────────────────────────────────
     let n = samples.len();
+    // Save before any processing for TSV pheno_raw column.
+    let phen_raw_for_tsv = phenotype.values.clone();
     let mut phen_values = phenotype.values.clone();
     impute_nan(&mut phen_values);
 
@@ -1958,10 +1960,7 @@ fn run_test(args: TestArgs) -> Result<(), Box<dyn Error>> {
     // Estimate imputed-missing count: after impute_nan(), missing samples all share
     // exactly the non-missing mean, which is generally non-integer for GT dosage.
     // Values strictly equal to the overall mean (within fp tolerance) are imputed.
-    let geno_mean = genotype.values.iter().sum::<f64>() / n as f64;
-    let n_imputed = genotype.values.iter()
-        .filter(|&&v| (v - geno_mean).abs() < 1e-9)
-        .count();
+    let n_imputed = genotype.raw_values.iter().filter(|v| v.is_none()).count();
     println!(
         "MAF: {:.4}  MA_count: {}  MA_samples: {}  missing/imputed: {}/{} ({:.1}%)",
         genotype.maf, genotype.ma_count, genotype.ma_samples,
@@ -2089,7 +2088,7 @@ fn run_test(args: TestArgs) -> Result<(), Box<dyn Error>> {
                 w,
                 "{}\t{:.6}\t{:.6}\t{}\t{:.6}\t{:.6}",
                 sample,
-                phen_values[i],
+                phen_raw_for_tsv[i],
                 phen_resid_saved[i],
                 gt,
                 genotype.values[i],
