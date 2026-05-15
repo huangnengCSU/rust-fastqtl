@@ -1834,6 +1834,19 @@ fn print_preview(label: &str, v: &[f64]) {
 }
 
 fn run_test(args: TestArgs) -> Result<(), Box<dyn Error>> {
+    if args.window <= 0 {
+        return Err("--window must be positive".into());
+    }
+    if args.min_window < 0 {
+        return Err("--min-window must be >= 0".into());
+    }
+    if args.min_window > args.window {
+        return Err("--min-window must be <= --window".into());
+    }
+    if !(0.0..0.5).contains(&args.maf_threshold) {
+        return Err("--maf-threshold must satisfy 0 <= x < 0.5".into());
+    }
+
     eprintln!("loading phenotype BED: {}", args.bed);
     let (samples, all_phenotypes, sample_index) = parse_bed(&args.bed)?;
 
