@@ -98,6 +98,10 @@ struct RunArgs {
     /// Use variant position (chr_pos) as variant ID instead of the VCF ID / BED ID column
     #[arg(long, action = ArgAction::SetTrue)]
     variant_pos: bool,
+
+    /// Maximum fraction of samples with missing genotype [0, 1]; variants above this are excluded
+    #[arg(long, default_value_t = 1.0)]
+    max_missing: f64,
 }
 
 #[derive(Debug, Parser)]
@@ -159,6 +163,10 @@ struct TestArgs {
     /// Use variant position (chr_pos) as variant ID instead of VCF ID column
     #[arg(long, action = ArgAction::SetTrue)]
     variant_pos: bool,
+
+    /// Maximum fraction of samples with missing genotype [0, 1]
+    #[arg(long, default_value_t = 1.0)]
+    max_missing: f64,
 
     /// Write per-sample TSV to this path (stats written as leading # comment lines)
     #[arg(long)]
@@ -562,6 +570,7 @@ fn parse_vcf(
     maf_threshold: f64,
     ma_sample_threshold: usize,
     use_pos: bool,
+    max_missing: f64,
 ) -> Result<Vec<Genotype>, Box<dyn Error>> {
     let mut reader = open_vcf_reader(path, region, window)?;
     let mut line = String::new();
@@ -626,6 +635,12 @@ fn parse_vcf(
             }
         }
 
+        let n_missing = vals_opt.iter().filter(|v| v.is_none()).count();
+        if n_missing as f64 / n_samples as f64 > max_missing {
+            line.clear();
+            continue;
+        }
+
         if let Some((maf, ma_count, ma_samples)) = maf_stats(&vals_opt) {
             if maf >= maf_threshold && ma_samples >= ma_sample_threshold {
                 let raw_values = vals_opt.clone();
@@ -667,6 +682,7 @@ fn parse_genotype_bed(
     maf_threshold: f64,
     ma_sample_threshold: usize,
     use_pos: bool,
+    max_missing: f64,
 ) -> Result<Vec<Genotype>, Box<dyn Error>> {
     let mut reader = open_bufread(path)?;
     let mut line = String::new();
@@ -724,6 +740,12 @@ fn parse_genotype_bed(
                     vals_opt[sidx] = v.parse::<f64>().ok();
                 }
             }
+        }
+
+        let n_missing = vals_opt.iter().filter(|v| v.is_none()).count();
+        if n_missing as f64 / n_samples as f64 > max_missing {
+            line.clear();
+            continue;
         }
 
         let stats = maf_stats(&vals_opt);
@@ -1632,6 +1654,7 @@ fn process_region(
             args.maf_threshold,
             args.ma_sample_threshold,
             args.variant_pos,
+            args.max_missing,
         )
         .map_err(|e| format!("[{}] VCF parse error: {}", region_label, e))?
     } else {
@@ -1645,6 +1668,7 @@ fn process_region(
             args.maf_threshold,
             args.ma_sample_threshold,
             args.variant_pos,
+            args.max_missing,
         )
         .map_err(|e| format!("[{}] bedmethyl parse error: {}", region_label, e))?
     };
@@ -1760,6 +1784,7 @@ fn process_region_nominal_stream<'a>(
             args.maf_threshold,
             args.ma_sample_threshold,
             args.variant_pos,
+            args.max_missing,
         )
         .map_err(|e| format!("[{}] VCF parse error: {}", region_label, e))?
     } else {
@@ -1773,6 +1798,7 @@ fn process_region_nominal_stream<'a>(
             args.maf_threshold,
             args.ma_sample_threshold,
             args.variant_pos,
+            args.max_missing,
         )
         .map_err(|e| format!("[{}] bedmethyl parse error: {}", region_label, e))?
     };
@@ -1855,6 +1881,9 @@ fn run_test(args: TestArgs) -> Result<(), Box<dyn Error>> {
     if !(0.0..0.5).contains(&args.maf_threshold) {
         return Err("--maf-threshold must satisfy 0 <= x < 0.5".into());
     }
+    if !(0.0..=1.0).contains(&args.max_missing) {
+        return Err("--max-missing must satisfy 0 <= x <= 1".into());
+    }
 
     eprintln!("loading phenotype BED: {}", args.bed);
     let (samples, all_phenotypes, sample_index) = parse_bed(&args.bed)?;
@@ -1894,6 +1923,7 @@ fn run_test(args: TestArgs) -> Result<(), Box<dyn Error>> {
             args.maf_threshold,
             args.ma_sample_threshold,
             args.variant_pos,
+            args.max_missing,
         )?
     } else {
         let gbed_path = args.bedmethyl.as_ref().unwrap();
@@ -1906,6 +1936,7 @@ fn run_test(args: TestArgs) -> Result<(), Box<dyn Error>> {
             args.maf_threshold,
             args.ma_sample_threshold,
             args.variant_pos,
+            args.max_missing,
         )?
     };
 
@@ -2115,6 +2146,9 @@ fn run_main(args: RunArgs) -> Result<(), Box<dyn Error>> {
     }
     if !(0.0..0.5).contains(&args.maf_threshold) {
         return Err("--maf-threshold must satisfy 0 <= x < 0.5".into());
+    }
+    if !(0.0..=1.0).contains(&args.max_missing) {
+        return Err("--max-missing must satisfy 0 <= x <= 1".into());
     }
     if args.region.is_empty() {
         return Err("at least one --region must be specified".into());
