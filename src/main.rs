@@ -1957,9 +1957,7 @@ fn run_test(args: TestArgs) -> Result<(), Box<dyn Error>> {
     println!("=== Variant ===");
     println!("ID:  {}", genotype.id);
     println!("Chr: {}  Pos: {}", phenotype.chr, genotype.pos);
-    // Estimate imputed-missing count: after impute_nan(), missing samples all share
-    // exactly the non-missing mean, which is generally non-integer for GT dosage.
-    // Values strictly equal to the overall mean (within fp tolerance) are imputed.
+    // Count missing genotypes before imputation; these are mean-imputed in values.
     let n_imputed = genotype.raw_values.iter().filter(|v| v.is_none()).count();
     println!(
         "MAF: {:.4}  MA_count: {}  MA_samples: {}  missing/imputed: {}/{} ({:.1}%)",
