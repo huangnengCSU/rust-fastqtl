@@ -197,6 +197,39 @@ p_empirical  p_beta_adjusted
 
 `p_beta_adjusted` is the key column for downstream FDR control (e.g. Storey's q-value or Benjamini-Hochberg).
 
+### Downstream post-processing scripts
+
+Two helper R scripts are provided for the standard FastQTL-style workflow that combines a permutation pass with a nominal pass:
+
+```bash
+Rscript scripts/calulateNominalPvalueThresholds_rustQTL.R \
+  permutation.txt \
+  0.05 \
+  nominal_thresholds.txt
+
+Rscript scripts/make_signif_pairs_rustQTL.R \
+  nominal_thresholds.txt \
+  nominal_all.txt \
+  significant_pairs.txt
+```
+
+`scripts/calulateNominalPvalueThresholds_rustQTL.R` reads the permutation-mode output, uses `p_beta_adjusted` to estimate q-values across phenotypes, finds the corrected p-value cutoff at the requested FDR, and converts that global corrected cutoff into a phenotype-specific nominal p-value threshold using each phenotype's fitted Beta distribution. The output contains:
+
+```
+phenotype_id  pval_nominal_threshold  qval
+```
+
+This step answers: for each phenotype that passes FDR, how small must a raw nominal cis-pair p-value be to be considered significant after permutation-based multiple-testing correction?
+
+`scripts/make_signif_pairs_rustQTL.R` reads the threshold file and the nominal-mode output, keeps phenotypes with `qval <= 0.05`, and reports all variant-phenotype pairs whose nominal p-value is at or below that phenotype's `pval_nominal_threshold`. The output is a significant-pairs table with nominal statistics plus the matched threshold and phenotype q-value:
+
+```
+phenotype_id  variant_id  distance  distance_to_body  ma_samples  ma_count
+maf  pval_nominal  pval_nominal_threshold  qval  beta  beta_se
+```
+
+This step answers: among the nominal cis scan results, which individual variant-phenotype pairs are significant for phenotypes that pass the permutation-based FDR threshold?
+
 ---
 
 ## bedMethyl format (`--bedmethyl`)
@@ -263,5 +296,6 @@ The following differences from https://github.com/francois-a/fastqtl are known a
 
 - [`clap`](https://crates.io/crates/clap) 4.x — argument parsing
 - [`rayon`](https://crates.io/crates/rayon) 1.x — data-parallel region processing
+- R post-processing scripts require the R package `data.table`; `scripts/calulateNominalPvalueThresholds_rustQTL.R` also requires `qvalue`
 
 Math functions (lgamma, regularized incomplete beta, Nelder-Mead) are implemented from scratch.
