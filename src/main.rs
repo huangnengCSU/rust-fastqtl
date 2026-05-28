@@ -173,7 +173,6 @@ struct TestArgs {
     out: Option<String>,
 }
 
-
 #[derive(Clone, Debug)]
 struct Region {
     chr: String,
@@ -195,7 +194,7 @@ struct Phenotype {
 struct Genotype {
     id: String,
     pos: i32,
-    values: Vec<f64>,       // after mean-imputation of missing
+    values: Vec<f64>,             // after mean-imputation of missing
     raw_values: Vec<Option<f64>>, // pre-imputation (None = missing)
     sd: f64,
     maf: f64,
@@ -215,6 +214,10 @@ struct XorShift64 {
 struct ChildBufRead {
     child: Child,
     stdout: BufReader<ChildStdout>,
+}
+
+fn variant_pos_id(chr: &str, pos: i32) -> String {
+    format!("{}_{}", chr, pos)
 }
 
 impl ChildBufRead {
@@ -650,7 +653,7 @@ fn parse_vcf(
                     .collect::<Vec<f64>>();
                 impute_nan(&mut values);
                 let id = if use_pos || cols[2] == "." {
-                    format!("{}_{}", chr, pos)
+                    variant_pos_id(chr, pos)
                 } else {
                     cols[2].to_string()
                 };
@@ -728,7 +731,7 @@ fn parse_genotype_bed(
         }
 
         let id = if use_pos {
-            format!("{}_{}", chr, pos)
+            variant_pos_id(chr, pos)
         } else {
             cols[3].to_string()
         };
@@ -1940,17 +1943,24 @@ fn run_test(args: TestArgs) -> Result<(), Box<dyn Error>> {
         )?
     };
 
-    let genotype = all_genotypes
+    let mut genotype = all_genotypes
         .iter()
-        .find(|g| g.id == args.variant_id)
+        .find(|g| {
+            g.id == args.variant_id || variant_pos_id(&phenotype.chr, g.pos) == args.variant_id
+        })
         .ok_or_else(|| {
             format!(
                 "variant '{}' not found on {} (or filtered by MAF/MA thresholds; \
-                 try --maf-threshold 0 --ma-sample-threshold 0)",
+                 try --variant-pos, --maf-threshold 0, and --ma-sample-threshold 0)",
                 args.variant_id, phenotype.chr
             )
         })?
         .clone();
+    if genotype.id != args.variant_id
+        && variant_pos_id(&phenotype.chr, genotype.pos) == args.variant_id
+    {
+        genotype.id = args.variant_id.clone();
+    }
 
     // ── Phenotype processing ──────────────────────────────────────────────────
     let n = samples.len();
@@ -1992,10 +2002,17 @@ fn run_test(args: TestArgs) -> Result<(), Box<dyn Error>> {
     let n_imputed = genotype.raw_values.iter().filter(|v| v.is_none()).count();
     println!(
         "MAF: {:.4}  MA_count: {}  MA_samples: {}  missing/imputed: {}/{} ({:.1}%)",
-        genotype.maf, genotype.ma_count, genotype.ma_samples,
-        n_imputed, n, n_imputed as f64 / n as f64 * 100.0
+        genotype.maf,
+        genotype.ma_count,
+        genotype.ma_samples,
+        n_imputed,
+        n,
+        n_imputed as f64 / n as f64 * 100.0
     );
-    print_preview("Raw genotype values (missing → mean-imputed)", &genotype.values);
+    print_preview(
+        "Raw genotype values (missing → mean-imputed)",
+        &genotype.values,
+    );
 
     let mut geno_resid = genotype.values.clone();
     residualizer.residualize(&mut geno_resid);
@@ -2059,13 +2076,21 @@ fn run_test(args: TestArgs) -> Result<(), Box<dyn Error>> {
     );
     println!(
         "  |dist from TSS| <= window:       {}  ({} <= {})",
-        if dist.abs() <= args.window { "PASS" } else { "FAIL" },
+        if dist.abs() <= args.window {
+            "PASS"
+        } else {
+            "FAIL"
+        },
         dist.abs(),
         args.window
     );
     println!(
         "  |dist from body| >= min_window:  {}  ({} >= {})",
-        if dist2.abs() >= args.min_window { "PASS" } else { "FAIL" },
+        if dist2.abs() >= args.min_window {
+            "PASS"
+        } else {
+            "FAIL"
+        },
         dist2.abs(),
         args.min_window
     );
@@ -2073,7 +2098,11 @@ fn run_test(args: TestArgs) -> Result<(), Box<dyn Error>> {
         let inside = is_inside_phenotype_body(genotype.pos, &phenotype);
         println!(
             "  Not inside intron body:          {}",
-            if inside { "FAIL (variant is inside body)" } else { "PASS" }
+            if inside {
+                "FAIL (variant is inside body)"
+            } else {
+                "PASS"
+            }
         );
     }
     println!(
@@ -2099,19 +2128,36 @@ fn run_test(args: TestArgs) -> Result<(), Box<dyn Error>> {
         writeln!(
             w,
             "# n={}\tn_cov={}\tdf={:.0}\tr={:.6}\tbeta={:.6}\tse={:.6}\tt2={}\tpval={}\tdist={}\tdist2={}\tcis_filter={}",
-            n, n_cov, df, c, b, bse,
-            if df > 0.0 { format!("{:.6}", t2) } else { "NA".to_string() },
-            if df > 0.0 { format!("{:.6e}", pval) } else { "NA".to_string() },
-            dist, dist2,
+            n,
+            n_cov,
+            df,
+            c,
+            b,
+            bse,
+            if df > 0.0 {
+                format!("{:.6}", t2)
+            } else {
+                "NA".to_string()
+            },
+            if df > 0.0 {
+                format!("{:.6e}", pval)
+            } else {
+                "NA".to_string()
+            },
+            dist,
+            dist2,
             if cis_result.is_some() { "PASS" } else { "FAIL" }
         )?;
 
         // Per-sample data.
-        writeln!(w, "sample\tpheno_raw\tpheno_resid\tgeno_gt\tgeno_raw\tgeno_resid")?;
+        writeln!(
+            w,
+            "sample\tpheno_raw\tpheno_resid\tgeno_gt\tgeno_raw\tgeno_resid"
+        )?;
         for (i, sample) in samples.iter().enumerate() {
             let gt = match genotype.raw_values[i] {
                 Some(v) => format!("{}", v),
-                None    => "NA".to_string(),
+                None => "NA".to_string(),
             };
             writeln!(
                 w,
