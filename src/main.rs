@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdout, Command, Stdio};
 
-use clap::{ArgAction, Parser};
+use clap::{ArgAction, Parser, ValueEnum};
 use flate2::read::MultiGzDecoder;
 use rayon::prelude::*;
 
@@ -59,6 +59,11 @@ struct RunArgs {
     /// Cis-window size in bp
     #[arg(short, long, default_value_t = 1_000_000)]
     window: i32,
+
+    /// Cis-window anchor: start = [start-W, start+W] (FastQTL-compatible),
+    /// body = [start-W, end+W]
+    #[arg(long, value_enum, default_value_t = WindowMode::Body)]
+    window_mode: WindowMode,
 
     /// Minimum distance (bp) from variant to phenotype body; variants closer than this are excluded.
     /// Useful to exclude CpG-overlapping SNPs in methylation QTL. Default 0 (no filtering).
@@ -140,6 +145,11 @@ struct TestArgs {
     #[arg(short, long, default_value_t = 1_000_000)]
     window: i32,
 
+    /// Cis-window anchor: start = [start-W, start+W] (FastQTL-compatible),
+    /// body = [start-W, end+W]
+    #[arg(long, value_enum, default_value_t = WindowMode::Body)]
+    window_mode: WindowMode,
+
     /// Minimum distance filter (bp) from variant to phenotype body
     #[arg(long, default_value_t = 0)]
     min_window: i32,
@@ -171,6 +181,15 @@ struct TestArgs {
     /// Write per-sample TSV to this path (stats written as leading # comment lines)
     #[arg(long)]
     out: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+enum WindowMode {
+    /// Anchor both sides of the window at phenotype start (original FastQTL behavior)
+    Start,
+    /// Extend the window from the entire phenotype interval
+    #[default]
+    Body,
 }
 
 #[derive(Clone, Debug)]
@@ -1398,15 +1417,43 @@ fn is_inside_phenotype_body(g_pos: i32, p: &Phenotype) -> bool {
     g_pos >= p.start && g_pos <= p.end
 }
 
+fn genotype_region_for_phenotypes(
+    region: &Region,
+    phenotypes: &[Phenotype],
+    window_mode: WindowMode,
+) -> Region {
+    if window_mode == WindowMode::Body {
+        Region {
+            chr: region.chr.clone(),
+            start: region.start,
+            end: phenotypes
+                .iter()
+                .map(|p| p.end)
+                .max()
+                .unwrap_or(region.end)
+                .max(region.end),
+        }
+    } else {
+        region.clone()
+    }
+}
+
 fn cis_target(
     g_pos: i32,
     p: &Phenotype,
     cis_window: i32,
+    window_mode: WindowMode,
     min_window: i32,
     exclude_intron_snps: bool,
 ) -> Option<(i32, i32)> {
     let dist = g_pos - p.start;
-    if dist.abs() > cis_window {
+    let in_cis_window = match window_mode {
+        WindowMode::Start => dist.abs() <= cis_window,
+        WindowMode::Body => {
+            g_pos >= p.start.saturating_sub(cis_window) && g_pos <= p.end.saturating_add(cis_window)
+        }
+    };
+    if !in_cis_window {
         return None;
     }
     if exclude_intron_snps && is_inside_phenotype_body(g_pos, p) {
@@ -1424,6 +1471,7 @@ fn run_nominal(
     phenotypes: &[Phenotype],
     genotypes: &[Genotype],
     cis_window: i32,
+    window_mode: WindowMode,
     min_window: i32,
     exclude_intron_snps: bool,
     threshold: f64,
@@ -1431,9 +1479,14 @@ fn run_nominal(
 ) -> Result<(), Box<dyn Error>> {
     for p in phenotypes {
         for g in genotypes {
-            let Some((dist, dist2)) =
-                cis_target(g.pos, p, cis_window, min_window, exclude_intron_snps)
-            else {
+            let Some((dist, dist2)) = cis_target(
+                g.pos,
+                p,
+                cis_window,
+                window_mode,
+                min_window,
+                exclude_intron_snps,
+            ) else {
                 continue;
             };
             let c = corr(&g.values, &p.values);
@@ -1468,6 +1521,7 @@ fn run_permutation(
     phenotype_raw_values: &[Vec<f64>],
     genotypes: &[Genotype],
     cis_window: i32,
+    window_mode: WindowMode,
     min_window: i32,
     exclude_intron_snps: bool,
     n_cov: usize,
@@ -1482,8 +1536,15 @@ fn run_permutation(
             .iter()
             .enumerate()
             .filter_map(|(gi, g)| {
-                cis_target(g.pos, p, cis_window, min_window, exclude_intron_snps)
-                    .map(|(d, d2)| (gi, d, d2))
+                cis_target(
+                    g.pos,
+                    p,
+                    cis_window,
+                    window_mode,
+                    min_window,
+                    exclude_intron_snps,
+                )
+                .map(|(d, d2)| (gi, d, d2))
             })
             .collect::<Vec<(usize, i32, i32)>>();
 
@@ -1647,10 +1708,14 @@ fn process_region(
         }
     }
 
+    // In body mode, ensure variants downstream of long phenotype intervals are loaded.
+    // Phenotypes are still assigned to regions by their start coordinate.
+    let genotype_region = genotype_region_for_phenotypes(region, &phenotypes, args.window_mode);
+
     let mut genotypes = if let Some(vcf_path) = args.vcf.as_ref() {
         parse_vcf(
             vcf_path,
-            region,
+            &genotype_region,
             args.window,
             sample_index,
             n_samples,
@@ -1664,7 +1729,7 @@ fn process_region(
         let gbed_path = args.bedmethyl.as_ref().unwrap();
         parse_genotype_bed(
             gbed_path,
-            region,
+            &genotype_region,
             args.window,
             sample_index,
             n_samples,
@@ -1711,6 +1776,7 @@ fn process_region(
             &phenotype_raw_values,
             &genotypes,
             args.window,
+            args.window_mode,
             args.min_window,
             args.exclude_intron_snps,
             n_cov_effective,
@@ -1725,6 +1791,7 @@ fn process_region(
             &phenotypes,
             &genotypes,
             args.window,
+            args.window_mode,
             args.min_window,
             args.exclude_intron_snps,
             args.threshold,
@@ -1777,10 +1844,12 @@ fn process_region_nominal_stream<'a>(
         }
     }
 
+    let genotype_region = genotype_region_for_phenotypes(region, &phenotypes, args.window_mode);
+
     let mut genotypes = if let Some(vcf_path) = args.vcf.as_ref() {
         parse_vcf(
             vcf_path,
-            region,
+            &genotype_region,
             args.window,
             sample_index,
             n_samples,
@@ -1794,7 +1863,7 @@ fn process_region_nominal_stream<'a>(
         let gbed_path = args.bedmethyl.as_ref().unwrap();
         parse_genotype_bed(
             gbed_path,
-            region,
+            &genotype_region,
             args.window,
             sample_index,
             n_samples,
@@ -1833,6 +1902,7 @@ fn process_region_nominal_stream<'a>(
         &phenotypes,
         &genotypes,
         args.window,
+        args.window_mode,
         args.min_window,
         args.exclude_intron_snps,
         args.threshold,
@@ -2048,6 +2118,7 @@ fn run_test(args: TestArgs) -> Result<(), Box<dyn Error>> {
         genotype.pos,
         &phenotype,
         args.window,
+        args.window_mode,
         args.min_window,
         args.exclude_intron_snps,
     );
@@ -2071,18 +2142,24 @@ fn run_test(args: TestArgs) -> Result<(), Box<dyn Error>> {
     println!("Distance (from body): {} bp", dist2);
     println!();
     println!(
-        "Cis filters (window={} bp  min_window={} bp  exclude_intron_snps={}):",
-        args.window, args.min_window, args.exclude_intron_snps
+        "Cis filters (window={} bp  window_mode={:?}  min_window={} bp  exclude_intron_snps={}):",
+        args.window, args.window_mode, args.min_window, args.exclude_intron_snps
     );
+    let window_pass = match args.window_mode {
+        WindowMode::Start => dist.abs() <= args.window,
+        WindowMode::Body => {
+            genotype.pos >= phenotype.start.saturating_sub(args.window)
+                && genotype.pos <= phenotype.end.saturating_add(args.window)
+        }
+    };
     println!(
-        "  |dist from TSS| <= window:       {}  ({} <= {})",
-        if dist.abs() <= args.window {
-            "PASS"
-        } else {
-            "FAIL"
-        },
-        dist.abs(),
-        args.window
+        "  In selected cis-window:          {}  ({}-{})",
+        if window_pass { "PASS" } else { "FAIL" },
+        phenotype.start.saturating_sub(args.window),
+        match args.window_mode {
+            WindowMode::Start => phenotype.start.saturating_add(args.window),
+            WindowMode::Body => phenotype.end.saturating_add(args.window),
+        }
     );
     println!(
         "  |dist from body| >= min_window:  {}  ({} >= {})",
@@ -2345,5 +2422,69 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else {
         let args = RunArgs::parse();
         run_main(args)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn interval_phenotype() -> Phenotype {
+        Phenotype {
+            id: "intron".to_string(),
+            chr: "chr1".to_string(),
+            start: 10_001,
+            end: 17_000,
+            values: Vec::new(),
+            sd: 0.0,
+        }
+    }
+
+    #[test]
+    fn window_mode_defaults_to_phenotype_body() {
+        assert_eq!(WindowMode::default(), WindowMode::Body);
+    }
+
+    #[test]
+    fn body_mode_includes_variant_just_after_long_interval() {
+        let phenotype = interval_phenotype();
+        let variant_pos = phenotype.end + 1;
+
+        assert!(cis_target(variant_pos, &phenotype, 5_000, WindowMode::Start, 0, false,).is_none());
+        assert!(cis_target(variant_pos, &phenotype, 5_000, WindowMode::Body, 0, false,).is_some());
+    }
+
+    #[test]
+    fn window_boundaries_are_inclusive() {
+        let phenotype = interval_phenotype();
+
+        assert!(cis_target(5_001, &phenotype, 5_000, WindowMode::Body, 0, false).is_some());
+        assert!(cis_target(22_000, &phenotype, 5_000, WindowMode::Body, 0, false).is_some());
+        assert!(cis_target(5_000, &phenotype, 5_000, WindowMode::Body, 0, false).is_none());
+        assert!(cis_target(22_001, &phenotype, 5_000, WindowMode::Body, 0, false).is_none());
+    }
+
+    #[test]
+    fn body_mode_expands_region_used_to_load_genotypes() {
+        let region = Region {
+            chr: "chr1".to_string(),
+            start: 10_000,
+            end: 12_000,
+        };
+        let phenotype = interval_phenotype();
+
+        let start_region = genotype_region_for_phenotypes(
+            &region,
+            std::slice::from_ref(&phenotype),
+            WindowMode::Start,
+        );
+        let body_region = genotype_region_for_phenotypes(
+            &region,
+            std::slice::from_ref(&phenotype),
+            WindowMode::Body,
+        );
+
+        assert_eq!(start_region.end, 12_000);
+        assert_eq!(body_region.end, phenotype.end);
     }
 }

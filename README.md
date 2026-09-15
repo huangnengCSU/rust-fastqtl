@@ -55,6 +55,7 @@ Options:
   -r, --region <REGION>...                   Region(s) to analyse (chr:start-end or chr); repeat for multiple
   -t, --threads <THREADS>                    Parallel threads [default: all CPUs]
   -w, --window <WINDOW>                      Cis-window size in bp [default: 1000000]
+      --window-mode <WINDOW_MODE>            Cis-window anchor: start or body [default: body]
       --min-window <MIN_WINDOW>              Minimum distance from variant to phenotype body [default: 0]
       --exclude-intron-snps                  Exclude variants whose position falls inside the phenotype BED interval
       --threshold <THRESHOLD>                P-value threshold for nominal-pass output [default: 1]
@@ -69,6 +70,12 @@ Options:
 ```
 
 Exactly one of `--vcf` or `--bedmethyl` must be provided.
+
+`--window-mode body` is the default and tests variants in
+`[phenotype_start - W, phenotype_end + W]`, which is useful for interval phenotypes
+such as intron usage. `--window-mode start` preserves the original FastQTL behavior
+and tests variants in `[phenotype_start - W, phenotype_start + W]`. BED starts are
+converted to 1-based coordinates before these bounds are calculated.
 
 ### VCF I/O behavior
 
