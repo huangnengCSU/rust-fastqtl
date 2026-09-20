@@ -66,10 +66,16 @@ Options:
       --seed <SEED>                          Random seed [default: 12345]
   -n, --normal                               Apply rank-normal transformation to phenotypes
       --variant-pos                          Use variant position (chr_pos) as variant ID instead of the VCF ID / BED ID column
+      --snp-only                             Restrict VCF input to biallelic SNPs (single A/C/G/T REF and ALT alleles)
   -h, --help                                 Print help
 ```
 
 Exactly one of `--vcf` or `--bedmethyl` must be provided.
+
+Use `--snp-only` with `--vcf` to exclude indels, symbolic structural variants,
+spanning-deletion alleles, and multiallelic records. A retained record must have
+exactly one A/C/G/T base in both REF and ALT. The option conflicts with
+`--bedmethyl`.
 
 `--window-mode body` is the default and tests variants in
 `[phenotype_start - W, phenotype_end + W]`, which is useful for interval phenotypes

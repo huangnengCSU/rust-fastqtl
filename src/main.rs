@@ -104,6 +104,10 @@ struct RunArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     variant_pos: bool,
 
+    /// Restrict VCF input to biallelic SNPs (single A/C/G/T REF and ALT alleles)
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with = "bedmethyl")]
+    snp_only: bool,
+
     /// Maximum fraction of samples with missing genotype [0, 1]; variants above this are excluded
     #[arg(long, default_value_t = 1.0)]
     max_missing: f64,
@@ -173,6 +177,10 @@ struct TestArgs {
     /// Use variant position (chr_pos) as variant ID instead of VCF ID column
     #[arg(long, action = ArgAction::SetTrue)]
     variant_pos: bool,
+
+    /// Restrict VCF input to biallelic SNPs (single A/C/G/T REF and ALT alleles)
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with = "bedmethyl")]
+    snp_only: bool,
 
     /// Maximum fraction of samples with missing genotype [0, 1]
     #[arg(long, default_value_t = 1.0)]
@@ -583,6 +591,18 @@ fn maf_stats(values: &[Option<f64>]) -> Option<(f64, i32, usize)> {
     }
 }
 
+fn is_biallelic_snp(reference: &str, alternate: &str) -> bool {
+    fn is_base(allele: &str) -> bool {
+        allele.len() == 1
+            && matches!(
+                allele.as_bytes()[0].to_ascii_uppercase(),
+                b'A' | b'C' | b'G' | b'T'
+            )
+    }
+
+    is_base(reference) && is_base(alternate)
+}
+
 fn parse_vcf(
     path: &str,
     region: &Region,
@@ -593,6 +613,7 @@ fn parse_vcf(
     ma_sample_threshold: usize,
     use_pos: bool,
     max_missing: f64,
+    snp_only: bool,
 ) -> Result<Vec<Genotype>, Box<dyn Error>> {
     let mut reader = open_vcf_reader(path, region, window)?;
     let mut line = String::new();
@@ -634,6 +655,10 @@ fn parse_vcf(
         let chr = cols[0];
         let pos: i32 = cols[1].parse()?;
         if chr != region.chr || pos < gstart || pos > gend {
+            line.clear();
+            continue;
+        }
+        if snp_only && !is_biallelic_snp(cols[3], cols[4]) {
             line.clear();
             continue;
         }
@@ -1723,6 +1748,7 @@ fn process_region(
             args.ma_sample_threshold,
             args.variant_pos,
             args.max_missing,
+            args.snp_only,
         )
         .map_err(|e| format!("[{}] VCF parse error: {}", region_label, e))?
     } else {
@@ -1857,6 +1883,7 @@ fn process_region_nominal_stream<'a>(
             args.ma_sample_threshold,
             args.variant_pos,
             args.max_missing,
+            args.snp_only,
         )
         .map_err(|e| format!("[{}] VCF parse error: {}", region_label, e))?
     } else {
@@ -1997,6 +2024,7 @@ fn run_test(args: TestArgs) -> Result<(), Box<dyn Error>> {
             args.ma_sample_threshold,
             args.variant_pos,
             args.max_missing,
+            args.snp_only,
         )?
     } else {
         let gbed_path = args.bedmethyl.as_ref().unwrap();
@@ -2486,5 +2514,18 @@ mod tests {
 
         assert_eq!(start_region.end, 12_000);
         assert_eq!(body_region.end, phenotype.end);
+    }
+
+    #[test]
+    fn snp_filter_accepts_only_biallelic_acgt_substitutions() {
+        assert!(is_biallelic_snp("A", "G"));
+        assert!(is_biallelic_snp("c", "t"));
+
+        assert!(!is_biallelic_snp("A", "AT"));
+        assert!(!is_biallelic_snp("AT", "A"));
+        assert!(!is_biallelic_snp("A", "G,T"));
+        assert!(!is_biallelic_snp("N", "G"));
+        assert!(!is_biallelic_snp("A", "<DEL>"));
+        assert!(!is_biallelic_snp("A", "*"));
     }
 }
