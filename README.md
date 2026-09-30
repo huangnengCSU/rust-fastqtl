@@ -77,11 +77,12 @@ spanning-deletion alleles, and multiallelic records. A retained record must have
 exactly one A/C/G/T base in both REF and ALT. The option conflicts with
 `--bedmethyl`.
 
-`--window-mode body` is the default and tests variants in
+`--window-mode body` is the default and tests variants whose intervals overlap
 `[phenotype_start - W, phenotype_end + W]`, which is useful for interval phenotypes
-such as intron usage. `--window-mode start` preserves the original FastQTL behavior
-and tests variants in `[phenotype_start - W, phenotype_start + W]`. BED starts are
-converted to 1-based coordinates before these bounds are calculated.
+such as intron usage. Point variants are treated as one-base intervals.
+`--window-mode start` preserves the original FastQTL behavior and tests variant
+starts in `[phenotype_start - W, phenotype_start + W]`. BED starts are converted
+to 1-based coordinates before these bounds are calculated.
 
 ### VCF I/O behavior
 
@@ -167,7 +168,7 @@ phenotype_id  variant_id  distance  distance_to_body  ma_samples  ma_count  maf 
 |---|---|
 | `variant_id` | VCF ID or BED ID column by default; with `--variant-pos`, reported as `chr_pos` using the 1-based variant position. VCF records with missing ID (`.`) also fall back to `chr_pos`. |
 | `distance` | `variant_pos − phenotype_start` (signed; TSS-anchored, matches original FastQTL) |
-| `distance_to_body` | Signed distance anchored at the nearer of `phenotype_start` or `phenotype_end`. The closer boundary is chosen as anchor; the value is `variant_pos − anchor` (negative = upstream of that boundary, positive = downstream). More informative than `distance` for long phenotypes such as introns, where the variant may be far from the TSS but close to the splice site. |
+| `distance_to_body` | Signed gap between the variant interval and phenotype body: negative upstream, positive downstream, and zero when the intervals overlap. Point variants are treated as one-base intervals. |
 
 Use `--exclude-intron-snps` to scan only variants outside each phenotype BED interval. For intron phenotypes, SNPs with positions inside the intron body are skipped in both nominal and permutation modes; upstream and downstream cis SNPs remain eligible.
 

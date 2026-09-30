@@ -222,7 +222,7 @@ struct Genotype {
     id: String,
     pos: i32,
     end: i32, // 1-based inclusive; equals pos for point variants (SNPs), = BED end for interval variants (DMRs)
-    values: Vec<f64>,             // after mean-imputation of missing
+    values: Vec<f64>, // after mean-imputation of missing
     raw_values: Vec<Option<f64>>, // pre-imputation (None = missing)
     sd: f64,
     maf: f64,
@@ -772,7 +772,10 @@ fn parse_genotype_bed(
         let start0: i32 = cols[1].parse()?;
         let pos = start0 + 1; // convert to 1-based
         let end: i32 = cols[2].parse()?; // BED end (1-based inclusive == 0-based exclusive)
-        if chr != region.chr || pos < gstart || pos > gend {
+        // Keep any genotype interval that overlaps the requested region. In
+        // particular, an interval may start before the cis window but extend
+        // into it.
+        if chr != region.chr || end < gstart || pos > gend {
             line.clear();
             continue;
         }
@@ -1480,11 +1483,10 @@ fn cis_target(
     exclude_intron_snps: bool,
 ) -> Option<(i32, i32)> {
     let dist = g_pos - p.start;
+    let dist2 = dist_to_body(g_pos, g_end, p.start, p.end);
     let in_cis_window = match window_mode {
         WindowMode::Start => dist.abs() <= cis_window,
-        WindowMode::Body => {
-            g_pos >= p.start.saturating_sub(cis_window) && g_pos <= p.end.saturating_add(cis_window)
-        }
+        WindowMode::Body => dist2.abs() <= cis_window,
     };
     if !in_cis_window {
         return None;
@@ -1492,7 +1494,6 @@ fn cis_target(
     if exclude_intron_snps && is_inside_phenotype_body(g_pos, p) {
         return None;
     }
-    let dist2 = dist_to_body(g_pos, g_end, p.start, p.end);
     if dist2.abs() < min_window {
         return None;
     }
@@ -2489,8 +2490,30 @@ mod tests {
         let phenotype = interval_phenotype();
         let variant_pos = phenotype.end + 1;
 
-        assert!(cis_target(variant_pos, variant_pos, &phenotype, 5_000, WindowMode::Start, 0, false,).is_none());
-        assert!(cis_target(variant_pos, variant_pos, &phenotype, 5_000, WindowMode::Body, 0, false,).is_some());
+        assert!(
+            cis_target(
+                variant_pos,
+                variant_pos,
+                &phenotype,
+                5_000,
+                WindowMode::Start,
+                0,
+                false,
+            )
+            .is_none()
+        );
+        assert!(
+            cis_target(
+                variant_pos,
+                variant_pos,
+                &phenotype,
+                5_000,
+                WindowMode::Body,
+                0,
+                false,
+            )
+            .is_some()
+        );
     }
 
     #[test]
@@ -2498,9 +2521,49 @@ mod tests {
         let phenotype = interval_phenotype();
 
         assert!(cis_target(5_001, 5_001, &phenotype, 5_000, WindowMode::Body, 0, false).is_some());
-        assert!(cis_target(22_000, 22_000, &phenotype, 5_000, WindowMode::Body, 0, false).is_some());
+        assert!(
+            cis_target(
+                22_000,
+                22_000,
+                &phenotype,
+                5_000,
+                WindowMode::Body,
+                0,
+                false
+            )
+            .is_some()
+        );
         assert!(cis_target(5_000, 5_000, &phenotype, 5_000, WindowMode::Body, 0, false).is_none());
-        assert!(cis_target(22_001, 22_001, &phenotype, 5_000, WindowMode::Body, 0, false).is_none());
+        assert!(
+            cis_target(
+                22_001,
+                22_001,
+                &phenotype,
+                5_000,
+                WindowMode::Body,
+                0,
+                false
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn body_mode_uses_the_whole_variant_interval() {
+        let phenotype = interval_phenotype();
+
+        // The interval starts outside the upstream window, but its end reaches
+        // the inclusive boundary and therefore belongs in the analysis.
+        assert!(cis_target(4_001, 5_001, &phenotype, 5_000, WindowMode::Body, 0, false).is_some());
+
+        // Ending one base before the boundary leaves a 5,001 bp gap.
+        assert!(cis_target(4_001, 5_000, &phenotype, 5_000, WindowMode::Body, 0, false).is_none());
+
+        // An interval overlapping the phenotype body has zero body distance.
+        assert_eq!(
+            cis_target(4_001, 10_001, &phenotype, 5_000, WindowMode::Body, 0, false),
+            Some((-6_000, 0))
+        );
     }
 
     #[test]
