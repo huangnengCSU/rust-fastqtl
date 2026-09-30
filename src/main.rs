@@ -221,6 +221,7 @@ struct Phenotype {
 struct Genotype {
     id: String,
     pos: i32,
+    end: i32, // 1-based inclusive; equals pos for point variants (SNPs), = BED end for interval variants (DMRs)
     values: Vec<f64>,             // after mean-imputation of missing
     raw_values: Vec<Option<f64>>, // pre-imputation (None = missing)
     sd: f64,
@@ -704,6 +705,7 @@ fn parse_vcf(
                 genotypes.push(Genotype {
                     id,
                     pos,
+                    end: pos,
                     values,
                     raw_values,
                     sd: 0.0,
@@ -769,6 +771,7 @@ fn parse_genotype_bed(
         let chr = cols[0];
         let start0: i32 = cols[1].parse()?;
         let pos = start0 + 1; // convert to 1-based
+        let end: i32 = cols[2].parse()?; // BED end (1-based inclusive == 0-based exclusive)
         if chr != region.chr || pos < gstart || pos > gend {
             line.clear();
             continue;
@@ -808,6 +811,7 @@ fn parse_genotype_bed(
                 genotypes.push(Genotype {
                     id,
                     pos,
+                    end,
                     values,
                     raw_values,
                     sd: 0.0,
@@ -1427,14 +1431,17 @@ impl Residualizer {
     }
 }
 
-/// Distance from variant to the nearer phenotype boundary (start or end).
-/// Picks whichever of start/end is closer, then returns g_pos - anchor (signed).
-/// Negative = upstream of that boundary, positive = downstream.
-fn dist_to_body(g_pos: i32, p_start: i32, p_end: i32) -> i32 {
-    if (g_pos - p_start).abs() <= (g_pos - p_end).abs() {
-        g_pos - p_start
+/// Signed gap between variant interval [g_start, g_end] and phenotype body [p_start, p_end].
+/// Overlap → 0. Variant strictly upstream (g_end < p_start) → g_end - p_start (negative).
+/// Variant strictly downstream (g_start > p_end) → g_start - p_end (positive).
+/// SNPs are the degenerate case g_start == g_end.
+fn dist_to_body(g_start: i32, g_end: i32, p_start: i32, p_end: i32) -> i32 {
+    if g_end < p_start {
+        g_end - p_start
+    } else if g_start > p_end {
+        g_start - p_end
     } else {
-        g_pos - p_end
+        0
     }
 }
 
@@ -1465,6 +1472,7 @@ fn genotype_region_for_phenotypes(
 
 fn cis_target(
     g_pos: i32,
+    g_end: i32,
     p: &Phenotype,
     cis_window: i32,
     window_mode: WindowMode,
@@ -1484,7 +1492,7 @@ fn cis_target(
     if exclude_intron_snps && is_inside_phenotype_body(g_pos, p) {
         return None;
     }
-    let dist2 = dist_to_body(g_pos, p.start, p.end);
+    let dist2 = dist_to_body(g_pos, g_end, p.start, p.end);
     if dist2.abs() < min_window {
         return None;
     }
@@ -1506,6 +1514,7 @@ fn run_nominal(
         for g in genotypes {
             let Some((dist, dist2)) = cis_target(
                 g.pos,
+                g.end,
                 p,
                 cis_window,
                 window_mode,
@@ -1563,6 +1572,7 @@ fn run_permutation(
             .filter_map(|(gi, g)| {
                 cis_target(
                     g.pos,
+                    g.end,
                     p,
                     cis_window,
                     window_mode,
@@ -2141,9 +2151,10 @@ fn run_test(args: TestArgs) -> Result<(), Box<dyn Error>> {
     };
 
     let dist = genotype.pos - phenotype.start;
-    let dist2 = dist_to_body(genotype.pos, phenotype.start, phenotype.end);
+    let dist2 = dist_to_body(genotype.pos, genotype.end, phenotype.start, phenotype.end);
     let cis_result = cis_target(
         genotype.pos,
+        genotype.end,
         &phenotype,
         args.window,
         args.window_mode,
@@ -2478,18 +2489,18 @@ mod tests {
         let phenotype = interval_phenotype();
         let variant_pos = phenotype.end + 1;
 
-        assert!(cis_target(variant_pos, &phenotype, 5_000, WindowMode::Start, 0, false,).is_none());
-        assert!(cis_target(variant_pos, &phenotype, 5_000, WindowMode::Body, 0, false,).is_some());
+        assert!(cis_target(variant_pos, variant_pos, &phenotype, 5_000, WindowMode::Start, 0, false,).is_none());
+        assert!(cis_target(variant_pos, variant_pos, &phenotype, 5_000, WindowMode::Body, 0, false,).is_some());
     }
 
     #[test]
     fn window_boundaries_are_inclusive() {
         let phenotype = interval_phenotype();
 
-        assert!(cis_target(5_001, &phenotype, 5_000, WindowMode::Body, 0, false).is_some());
-        assert!(cis_target(22_000, &phenotype, 5_000, WindowMode::Body, 0, false).is_some());
-        assert!(cis_target(5_000, &phenotype, 5_000, WindowMode::Body, 0, false).is_none());
-        assert!(cis_target(22_001, &phenotype, 5_000, WindowMode::Body, 0, false).is_none());
+        assert!(cis_target(5_001, 5_001, &phenotype, 5_000, WindowMode::Body, 0, false).is_some());
+        assert!(cis_target(22_000, 22_000, &phenotype, 5_000, WindowMode::Body, 0, false).is_some());
+        assert!(cis_target(5_000, 5_000, &phenotype, 5_000, WindowMode::Body, 0, false).is_none());
+        assert!(cis_target(22_001, 22_001, &phenotype, 5_000, WindowMode::Body, 0, false).is_none());
     }
 
     #[test]
