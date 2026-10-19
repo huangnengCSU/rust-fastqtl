@@ -168,7 +168,7 @@ phenotype_id  variant_id  distance  distance_to_body  ma_samples  ma_count  maf 
 |---|---|
 | `variant_id` | VCF ID or BED ID column by default; with `--variant-pos`, reported as `chr_pos` using the 1-based variant position. VCF records with missing ID (`.`) also fall back to `chr_pos`. |
 | `distance` | `variant_pos − phenotype_start` (signed; TSS-anchored, matches original FastQTL) |
-| `distance_to_body` | Signed gap between the variant interval and phenotype body: negative upstream, positive downstream, and zero when the intervals overlap. Point variants are treated as one-base intervals. |
+| `distance_to_body` | Point variants (SNPs): signed distance from the variant to the nearer of phenotype start/end (`pos - start` or `pos - end`), so variants inside the body are non-zero. Interval variants: signed gap between the variant interval and phenotype body, negative upstream, positive downstream, and zero when the intervals overlap. |
 
 Use `--exclude-intron-snps` to scan only variants outside each phenotype BED interval. For intron phenotypes, SNPs with positions inside the intron body are skipped in both nominal and permutation modes; upstream and downstream cis SNPs remain eligible.
 

@@ -1434,18 +1434,31 @@ impl Residualizer {
     }
 }
 
-/// Signed gap between variant interval [g_start, g_end] and phenotype body [p_start, p_end].
-/// Overlap → 0. Variant strictly upstream (g_end < p_start) → g_end - p_start (negative).
-/// Variant strictly downstream (g_start > p_end) → g_start - p_end (positive).
-/// SNPs are the degenerate case g_start == g_end.
+/// Signed distance from variant [g_start, g_end] to phenotype body [p_start, p_end].
+/// Point variants (SNPs, g_start == g_end): picks whichever of start/end is closer,
+/// then returns g_pos - anchor (signed), so variants inside the body are non-zero.
+/// Interval variants: signed gap. Overlap → 0. Variant strictly upstream
+/// (g_end < p_start) → g_end - p_start (negative). Variant strictly downstream
+/// (g_start > p_end) → g_start - p_end (positive).
 fn dist_to_body(g_start: i32, g_end: i32, p_start: i32, p_end: i32) -> i32 {
-    if g_end < p_start {
+    if g_start == g_end {
+        if (g_start - p_start).abs() <= (g_start - p_end).abs() {
+            g_start - p_start
+        } else {
+            g_start - p_end
+        }
+    } else if g_end < p_start {
         g_end - p_start
     } else if g_start > p_end {
         g_start - p_end
     } else {
         0
     }
+}
+
+/// Whether variant [g_start, g_end] overlaps the body cis-window [p.start - W, p.end + W].
+fn in_body_window(g_start: i32, g_end: i32, p: &Phenotype, cis_window: i32) -> bool {
+    g_end >= p.start.saturating_sub(cis_window) && g_start <= p.end.saturating_add(cis_window)
 }
 
 fn is_inside_phenotype_body(g_pos: i32, p: &Phenotype) -> bool {
@@ -1486,7 +1499,7 @@ fn cis_target(
     let dist2 = dist_to_body(g_pos, g_end, p.start, p.end);
     let in_cis_window = match window_mode {
         WindowMode::Start => dist.abs() <= cis_window,
-        WindowMode::Body => dist2.abs() <= cis_window,
+        WindowMode::Body => in_body_window(g_pos, g_end, p, cis_window),
     };
     if !in_cis_window {
         return None;
@@ -2187,10 +2200,7 @@ fn run_test(args: TestArgs) -> Result<(), Box<dyn Error>> {
     );
     let window_pass = match args.window_mode {
         WindowMode::Start => dist.abs() <= args.window,
-        WindowMode::Body => {
-            genotype.pos >= phenotype.start.saturating_sub(args.window)
-                && genotype.pos <= phenotype.end.saturating_add(args.window)
-        }
+        WindowMode::Body => in_body_window(genotype.pos, genotype.end, &phenotype, args.window),
     };
     println!(
         "  In selected cis-window:          {}  ({}-{})",
@@ -2563,6 +2573,35 @@ mod tests {
         assert_eq!(
             cis_target(4_001, 10_001, &phenotype, 5_000, WindowMode::Body, 0, false),
             Some((-6_000, 0))
+        );
+    }
+
+    #[test]
+    fn snp_dist_to_body_uses_nearest_boundary() {
+        // Outside the body: signed distance to the near boundary.
+        assert_eq!(dist_to_body(9_991, 9_991, 10_001, 17_000), -10);
+        assert_eq!(dist_to_body(17_020, 17_020, 10_001, 17_000), 20);
+        // Inside the body: still measured from the nearest boundary, not 0.
+        assert_eq!(dist_to_body(10_101, 10_101, 10_001, 17_000), 100);
+        assert_eq!(dist_to_body(16_900, 16_900, 10_001, 17_000), -100);
+        assert_eq!(dist_to_body(10_001, 10_001, 10_001, 17_000), 0);
+    }
+
+    #[test]
+    fn body_mode_keeps_deep_intronic_snp_of_long_interval() {
+        let phenotype = interval_phenotype();
+        // |dist_to_body| = 3,000 > window, but the SNP lies inside the body.
+        assert_eq!(
+            cis_target(
+                13_001,
+                13_001,
+                &phenotype,
+                1_000,
+                WindowMode::Body,
+                0,
+                false
+            ),
+            Some((3_000, 3_000))
         );
     }
 
