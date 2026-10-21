@@ -954,11 +954,11 @@ fn inverse_normal_cdf(p: f64) -> f64 {
 
     if p < plow {
         let q = (-2.0 * p.ln()).sqrt();
-        -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5])
+        (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5])
             / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
     } else if p > phigh {
         let q = (-2.0 * (1.0 - p).ln()).sqrt();
-        (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5])
+        -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5])
             / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
     } else {
         let q = p - 0.5;
@@ -2640,5 +2640,44 @@ mod tests {
         assert!(!is_biallelic_snp("N", "G"));
         assert!(!is_biallelic_snp("A", "<DEL>"));
         assert!(!is_biallelic_snp("A", "*"));
+    }
+
+    #[test]
+    fn inverse_normal_cdf_has_correct_tail_signs() {
+        let cases = [
+            (1e-6, -4.753424308822899),
+            (0.001, -3.090232306167813),
+            (0.01, -2.326347874040841),
+            (0.02, -2.053748910631823),
+            (0.5, 0.0),
+            (0.98, 2.053748910631823),
+            (0.99, 2.326347874040841),
+            (0.999, 3.090232306167813),
+        ];
+        for (p, expected) in cases {
+            let got = inverse_normal_cdf(p);
+            assert!((got - expected).abs() < 1e-8, "p={p}: got {got}, expected {expected}");
+        }
+    }
+
+    #[test]
+    fn inverse_normal_cdf_is_monotonic_and_round_trips() {
+        let mut prev = f64::NEG_INFINITY;
+        for i in 1..10_000 {
+            let p = i as f64 / 10_000.0;
+            let x = inverse_normal_cdf(p);
+            assert!(x > prev, "not increasing at p={p}");
+            assert!((normal_cdf(x) - p).abs() < 1e-6, "round trip failed at p={p}");
+            prev = x;
+        }
+    }
+
+    #[test]
+    fn rank_normalize_preserves_order_in_tails() {
+        let mut v: Vec<f64> = (0..200).map(|i| i as f64).collect();
+        rank_normalize(&mut v);
+        assert!(v.windows(2).all(|w| w[0] < w[1]));
+        assert!(v[0] < -2.5 && v[199] > 2.5);
+        assert!((v[0] + v[199]).abs() < 1e-8);
     }
 }
