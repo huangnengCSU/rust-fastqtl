@@ -104,7 +104,7 @@ struct RunArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     variant_pos: bool,
 
-    /// Use chr_pos_ref_alt as variant ID (VCF input only)
+    /// Use chr_pos_ref_alt as variant ID (VCF input only); multiallelic records are skipped.
     #[arg(
         long,
         action = ArgAction::SetTrue,
@@ -186,7 +186,7 @@ struct TestArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     variant_pos: bool,
 
-    /// Use chr_pos_ref_alt as variant ID (VCF input only)
+    /// Use chr_pos_ref_alt as variant ID (VCF input only); multiallelic records are skipped.
     #[arg(
         long,
         action = ArgAction::SetTrue,
@@ -681,6 +681,10 @@ fn parse_vcf(
             continue;
         }
         if snp_only && !is_biallelic_snp(cols[3], cols[4]) {
+            line.clear();
+            continue;
+        }
+        if use_pos_alleles && cols[4].contains(',') {
             line.clear();
             continue;
         }
