@@ -66,6 +66,7 @@ Options:
       --seed <SEED>                          Random seed [default: 12345]
   -n, --normal                               Apply rank-normal transformation to phenotypes
       --variant-pos                          Use variant position (chr_pos) as variant ID instead of the VCF ID / BED ID column
+      --variant-pos-alleles                  Use chr_pos_ref_alt as variant ID (VCF input only; conflicts with --variant-pos)
       --snp-only                             Restrict VCF input to biallelic SNPs (single A/C/G/T REF and ALT alleles)
   -h, --help                                 Print help
 ```
@@ -166,7 +167,7 @@ phenotype_id  variant_id  distance  distance_to_body  ma_samples  ma_count  maf 
 
 | Column | Description |
 |---|---|
-| `variant_id` | VCF ID or BED ID column by default; with `--variant-pos`, reported as `chr_pos` using the 1-based variant position. VCF records with missing ID (`.`) also fall back to `chr_pos`. |
+| `variant_id` | VCF ID or BED ID column by default; with `--variant-pos`, reported as `chr_pos` using the 1-based variant position; with `--variant-pos-alleles`, reported as `chr_pos_ref_alt` (VCF only). VCF records with missing ID (`.`) fall back to `chr_pos` unless `--variant-pos-alleles` is used. |
 | `distance` | `variant_pos − phenotype_start` (signed; TSS-anchored, matches original FastQTL) |
 | `distance_to_body` | Point variants (SNPs): signed distance from the variant to the nearer of phenotype start/end (`pos - start` or `pos - end`), so variants inside the body are non-zero. Interval variants: signed gap between the variant interval and phenotype body, negative upstream, positive downstream, and zero when the intervals overlap. |
 

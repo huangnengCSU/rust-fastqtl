@@ -104,6 +104,14 @@ struct RunArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     variant_pos: bool,
 
+    /// Use chr_pos_ref_alt as variant ID (VCF input only)
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        conflicts_with_all = ["variant_pos", "bedmethyl"]
+    )]
+    variant_pos_alleles: bool,
+
     /// Restrict VCF input to biallelic SNPs (single A/C/G/T REF and ALT alleles)
     #[arg(long, action = ArgAction::SetTrue, conflicts_with = "bedmethyl")]
     snp_only: bool,
@@ -178,6 +186,14 @@ struct TestArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     variant_pos: bool,
 
+    /// Use chr_pos_ref_alt as variant ID (VCF input only)
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        conflicts_with_all = ["variant_pos", "bedmethyl"]
+    )]
+    variant_pos_alleles: bool,
+
     /// Restrict VCF input to biallelic SNPs (single A/C/G/T REF and ALT alleles)
     #[arg(long, action = ArgAction::SetTrue, conflicts_with = "bedmethyl")]
     snp_only: bool,
@@ -246,6 +262,10 @@ struct ChildBufRead {
 
 fn variant_pos_id(chr: &str, pos: i32) -> String {
     format!("{}_{}", chr, pos)
+}
+
+fn variant_pos_alleles_id(chr: &str, pos: i32, reference: &str, alternate: &str) -> String {
+    format!("{}_{}_{}_{}", chr, pos, reference, alternate)
 }
 
 impl ChildBufRead {
@@ -613,6 +633,7 @@ fn parse_vcf(
     maf_threshold: f64,
     ma_sample_threshold: usize,
     use_pos: bool,
+    use_pos_alleles: bool,
     max_missing: f64,
     snp_only: bool,
 ) -> Result<Vec<Genotype>, Box<dyn Error>> {
@@ -697,7 +718,9 @@ fn parse_vcf(
                     .map(|v| v.unwrap_or(f64::NAN))
                     .collect::<Vec<f64>>();
                 impute_nan(&mut values);
-                let id = if use_pos || cols[2] == "." {
+                let id = if use_pos_alleles {
+                    variant_pos_alleles_id(chr, pos, cols[3], cols[4])
+                } else if use_pos || cols[2] == "." {
                     variant_pos_id(chr, pos)
                 } else {
                     cols[2].to_string()
@@ -1771,6 +1794,7 @@ fn process_region(
             args.maf_threshold,
             args.ma_sample_threshold,
             args.variant_pos,
+            args.variant_pos_alleles,
             args.max_missing,
             args.snp_only,
         )
@@ -1906,6 +1930,7 @@ fn process_region_nominal_stream<'a>(
             args.maf_threshold,
             args.ma_sample_threshold,
             args.variant_pos,
+            args.variant_pos_alleles,
             args.max_missing,
             args.snp_only,
         )
@@ -2047,6 +2072,7 @@ fn run_test(args: TestArgs) -> Result<(), Box<dyn Error>> {
             args.maf_threshold,
             args.ma_sample_threshold,
             args.variant_pos,
+            args.variant_pos_alleles,
             args.max_missing,
             args.snp_only,
         )?
@@ -2493,6 +2519,14 @@ mod tests {
     #[test]
     fn window_mode_defaults_to_phenotype_body() {
         assert_eq!(WindowMode::default(), WindowMode::Body);
+    }
+
+    #[test]
+    fn position_alleles_id_contains_vcf_alleles() {
+        assert_eq!(
+            variant_pos_alleles_id("chr22", 16_050_075, "A", "G"),
+            "chr22_16050075_A_G"
+        );
     }
 
     #[test]
